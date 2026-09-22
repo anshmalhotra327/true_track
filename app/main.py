@@ -26,7 +26,7 @@ from .replay import get_trip, TRIPS
 from .model import get_model_bundle
 from .fusion import OnlineFusionSession
 
-app = FastAPI(title="TrueTrack")
+app = FastAPI(title="S.A.F.A.R. — Sensor-Aided Fusion for Accurate Routing")
 
 app.add_middleware(
     CORSMiddleware,

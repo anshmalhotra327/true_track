@@ -13,7 +13,7 @@
       <div class="logo-badge">S.A.F.A.R.</div>
       <div>
         <h1>Sensor-Aided Fusion for Accurate Routing</h1>
-        <span class="subtitle">AI-ML Intelligent Dead Reckoning System — SIH26168 | Team DietCode</span>
+        <span class="subtitle">AI-ML Intelligent Dead Reckoning (IDR) System — SIH26168 | Team DietCode</span>
       </div>
     </div>
     <div id="live-indicator" class="live-pill status-gnss">
@@ -48,53 +48,134 @@
 
   <div class="tabs">
     <button id="tab-live" class="tab active">Live Navigation</button>
-    <button id="tab-replay" class="tab">Dataset Replay Mode</button>
+    <button id="tab-replay" class="tab">Benchmark Replay Mode</button>
   </div>
 
-  <div id="map"></div>
+  <!-- Map Container -->
+  <div id="map-container">
+    <div id="map"></div>
+    
+    <!-- Floating Action Controls on Map -->
+    <div class="map-floating-controls">
+      <button id="btn-recenter" class="floating-btn" title="Recenter on current location" disabled>
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg>
+      </button>
+      <button id="btn-pin-mode" class="floating-btn" title="Tap map to set destination pin">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 0 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
+      </button>
+    </div>
+
+    <!-- Map Info Overlay -->
+    <div id="route-summary-card" class="route-summary-card hidden">
+      <div class="route-info-left">
+        <span class="route-time" id="route-eta">—</span>
+        <span class="route-dist" id="route-distance">—</span>
+      </div>
+      <button id="btn-clear-route" class="btn-sm">Clear</button>
+    </div>
+  </div>
 
   <!-- Live Mode Controls -->
   <div class="panel" id="panel-live">
-    <div class="row">
-      <button id="btn-start-live" class="primary-btn">Start Live Tracking</button>
-      <button id="btn-recenter" disabled>Recenter</button>
-    </div>
-    <div class="row search-row">
-      <input type="text" id="destination-search" placeholder="Enter destination (e.g. Connaught Place, New Delhi)">
-      <button id="btn-route">Get Route</button>
+    <div class="search-box-container">
+      <div class="search-input-wrapper">
+        <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+        <input type="text" id="destination-search" placeholder="Search destination or tap anywhere on map...">
+        <button id="btn-clear-search" class="clear-icon hidden">✕</button>
+      </div>
+      <button id="btn-route" class="action-btn">Route</button>
     </div>
     <div id="geocode-results" class="geocode-results hidden"></div>
-    <div class="row outage-row">
-      <label class="switch">
-        <input type="checkbox" id="toggle-outage-live">
-        <span class="slider round"></span>
-      </label>
-      <span class="switch-label"><strong>Force GNSS Outage</strong> (simulate tunnel / blackout indoors)</span>
+
+    <!-- Quick Shortcuts Chips -->
+    <div class="quick-chips">
+      <span class="chip-label">Quick Destination:</span>
+      <button class="chip-btn" data-query="Connaught Place, New Delhi">Connaught Place</button>
+      <button class="chip-btn" data-query="India Gate, New Delhi">India Gate</button>
+      <button class="chip-btn" data-query="IGI Airport, New Delhi">Airport</button>
+      <button class="chip-btn" data-query="AIIMS Hospital, New Delhi">Hospital</button>
     </div>
+
+    <div class="action-bar">
+      <button id="btn-start-live" class="primary-btn">
+        <span class="pulse-icon"></span> Start Live Tracking
+      </button>
+      <div class="outage-toggle-pill">
+        <label class="switch">
+          <input type="checkbox" id="toggle-outage-live">
+          <span class="slider round"></span>
+        </label>
+        <span class="switch-label"><strong>Force GNSS Outage</strong> (simulate tunnel indoors)</span>
+      </div>
+    </div>
+
     <p class="hint">
-      <strong>Zero-Velocity Update (ZUPT)</strong> &amp; <strong>Disturbance Filter</strong> active: Hand tremors and wrist jerks are automatically filtered out. True vehicle navigation begins upon detected vehicle forward kinematics or GPS movement.
+      💡 <strong>Tip:</strong> Tap anywhere on the map to drop a destination pin. Rotate your phone to see the real-time Google Maps-style heading cone sweep. Zero-Velocity Update (ZUPT) and hand-shake filters keep your location rock solid.
     </p>
   </div>
 
   <!-- Replay Mode Controls -->
   <div class="panel hidden" id="panel-replay">
-    <div class="row">
-      <label>Demo trip (IO-VNBD):</label>
-      <select id="trip-select"></select>
-      <button id="btn-start-replay" class="primary-btn">Start</button>
-      <button id="btn-pause-replay" disabled>Pause</button>
+    <div class="replay-controls-row">
+      <div class="trip-selector-wrap">
+        <label>Benchmark Trip:</label>
+        <select id="trip-select"></select>
+      </div>
+      <div class="playback-buttons">
+        <button id="btn-start-replay" class="primary-btn">Start Replay</button>
+        <button id="btn-pause-replay" disabled>Pause</button>
+        <div class="speed-multiplier-group">
+          <button class="speed-btn active" data-speed="1">1x</button>
+          <button class="speed-btn" data-speed="2">2x</button>
+          <button class="speed-btn" data-speed="4">4x</button>
+        </div>
+      </div>
     </div>
-    <div class="row outage-row">
+
+    <!-- Replay Benchmark Dashboard -->
+    <div class="replay-benchmark-card">
+      <div class="replay-progress-wrap">
+        <div class="progress-bar-bg">
+          <div id="replay-progress-fill" class="progress-bar-fill"></div>
+        </div>
+        <div class="progress-time">
+          <span id="replay-phase-text">Phase: Ready</span>
+          <span id="replay-time-text">0s / 60s</span>
+        </div>
+      </div>
+
+      <div class="benchmark-stats-grid">
+        <div class="b-stat">
+          <span class="b-label">S.A.F.A.R. Drift</span>
+          <span class="b-val val-good" id="rep-safar-drift">—</span>
+        </div>
+        <div class="b-stat">
+          <span class="b-label">Naive Double-Int. Drift</span>
+          <span class="b-val val-bad" id="rep-naive-drift">—</span>
+        </div>
+        <div class="b-stat">
+          <span class="b-label">Drift Reduction</span>
+          <span class="b-val val-highlight" id="rep-reduction">—</span>
+        </div>
+        <div class="b-stat">
+          <span class="b-label">Distance Travelled</span>
+          <span class="b-val" id="rep-distance">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="outage-toggle-pill" style="margin-top: 8px;">
       <label class="switch">
         <input type="checkbox" id="toggle-outage-replay" checked>
         <span class="slider round"></span>
       </label>
       <span class="switch-label">Simulate GNSS Outage during replay</span>
     </div>
+
     <div class="legend-row">
-      <span><span class="legend-dot dot-gt"></span> Ground Truth (GPS)</span>
-      <span><span class="legend-dot dot-ai"></span> S.A.F.A.R. AI-Fused (IDR)</span>
-      <span><span class="legend-dot dot-naive"></span> Naive Integration (Drift)</span>
+      <span><span class="legend-dot dot-gt"></span> Ground Truth GPS (True Route)</span>
+      <span><span class="legend-dot dot-ai"></span> S.A.F.A.R. AI-Fused IDR</span>
+      <span><span class="legend-dot dot-naive"></span> Naive Integration (Uncorrected Drift)</span>
     </div>
   </div>
 
