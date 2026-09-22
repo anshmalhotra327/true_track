@@ -2,180 +2,127 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>S.A.F.A.R. — Sensor-Aided Fusion for Accurate Routing</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>S.A.F.A.R. — Intelligent Navigation &amp; Dead Reckoning</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <div class="logo-badge">S.A.F.A.R.</div>
-      <div>
-        <h1>Sensor-Aided Fusion for Accurate Routing</h1>
-        <span class="subtitle">AI-ML Intelligent Dead Reckoning (IDR) System — SIH26168 | Team DietCode</span>
+  <!-- Full-screen Map -->
+  <div id="map"></div>
+
+  <!-- Top Floating Navigation Bar -->
+  <div class="top-nav-bar">
+    <div class="search-card">
+      <div class="search-input-box">
+        <svg class="nav-icon" viewBox="0 0 24 24" width="20" height="20" fill="#1a73e8"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 0 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
+        <input type="text" id="destination-search" placeholder="Search destination or tap map to drop pin..." autocomplete="off">
+        <button id="btn-clear-search" class="icon-btn hidden" title="Clear">✕</button>
       </div>
-    </div>
-    <div id="live-indicator" class="live-pill status-gnss">
-      <span class="dot"></span> <span id="indicator-text">GPS Standby</span>
-    </div>
-  </header>
-
-  <!-- Telemetry HUD Dashboard -->
-  <div class="hud-grid">
-    <div class="hud-card">
-      <span class="hud-label">Speed</span>
-      <span class="hud-val" id="hud-speed">0.0 <span class="unit">km/h</span></span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">Heading</span>
-      <span class="hud-val" id="hud-heading">—</span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">Confidence</span>
-      <span class="hud-val" id="hud-conf">95<span class="unit">%</span></span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">Motion State</span>
-      <span class="hud-val motion-state" id="hud-motion">Stationary (ZUPT)</span>
-    </div>
-  </div>
-
-  <div id="status-banner" class="status-banner hidden">
-    <span class="shield-icon">🛡️</span>
-    <span id="banner-text">Sensor-Aided Navigation Active: Continuing seamless positioning without GPS</span>
-  </div>
-
-  <div class="tabs">
-    <button id="tab-live" class="tab active">Live Navigation</button>
-    <button id="tab-replay" class="tab">Benchmark Replay Mode</button>
-  </div>
-
-  <!-- Map Container -->
-  <div id="map-container">
-    <div id="map"></div>
-    
-    <!-- Floating Action Controls on Map -->
-    <div class="map-floating-controls">
-      <button id="btn-recenter" class="floating-btn" title="Recenter on current location" disabled>
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg>
-      </button>
-      <button id="btn-pin-mode" class="floating-btn" title="Tap map to set destination pin">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 0 1 0-5 2.5 2.5 0 0 1 0 5z"/></svg>
-      </button>
+      <!-- Suggestions Dropdown -->
+      <div id="suggestions-box" class="suggestions-box hidden"></div>
     </div>
 
-    <!-- Map Info Overlay -->
-    <div id="route-summary-card" class="route-summary-card hidden">
-      <div class="route-info-left">
-        <span class="route-time" id="route-eta">—</span>
-        <span class="route-dist" id="route-distance">—</span>
+    <!-- Quick Chips / Categories -->
+    <div class="quick-chips-scroll">
+      <button class="chip-item" data-q="Petrol Pump">⛽ Fuel</button>
+      <button class="chip-item" data-q="Hospital">🏥 Hospital</button>
+      <button class="chip-item" data-q="Railway Station">🚆 Station</button>
+      <button class="chip-item" data-q="Metro Station">🚇 Metro</button>
+      <button class="chip-item" data-q="Airport">✈️ Airport</button>
+    </div>
+
+    <!-- Mode & Outage Control Strip -->
+    <div class="status-strip">
+      <div id="mode-badge" class="mode-badge mode-gnss">
+        <span class="pulse-dot"></span>
+        <span id="mode-text">GNSS Active</span>
       </div>
-      <button id="btn-clear-route" class="btn-sm">Clear</button>
-    </div>
-  </div>
-
-  <!-- Live Mode Controls -->
-  <div class="panel" id="panel-live">
-    <div class="search-box-container">
-      <div class="search-input-wrapper">
-        <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-        <input type="text" id="destination-search" placeholder="Search destination or tap anywhere on map...">
-        <button id="btn-clear-search" class="clear-icon hidden">✕</button>
-      </div>
-      <button id="btn-route" class="action-btn">Route</button>
-    </div>
-    <div id="geocode-results" class="geocode-results hidden"></div>
-
-    <!-- Quick Shortcuts Chips -->
-    <div class="quick-chips">
-      <span class="chip-label">Quick Destination:</span>
-      <button class="chip-btn" data-query="Connaught Place, New Delhi">Connaught Place</button>
-      <button class="chip-btn" data-query="India Gate, New Delhi">India Gate</button>
-      <button class="chip-btn" data-query="IGI Airport, New Delhi">Airport</button>
-      <button class="chip-btn" data-query="AIIMS Hospital, New Delhi">Hospital</button>
-    </div>
-
-    <div class="action-bar">
-      <button id="btn-start-live" class="primary-btn">
-        <span class="pulse-icon"></span> Start Live Tracking
-      </button>
-      <div class="outage-toggle-pill">
-        <label class="switch">
-          <input type="checkbox" id="toggle-outage-live">
+      <label class="outage-toggle-wrap">
+        <span class="toggle-text">Simulate Tunnel Outage:</span>
+        <div class="switch">
+          <input type="checkbox" id="toggle-outage">
           <span class="slider round"></span>
-        </label>
-        <span class="switch-label"><strong>Force GNSS Outage</strong> (simulate tunnel indoors)</span>
-      </div>
+        </div>
+      </label>
     </div>
 
-    <p class="hint">
-      💡 <strong>Tip:</strong> Tap anywhere on the map to drop a destination pin. Rotate your phone to see the real-time Google Maps-style heading cone sweep. Zero-Velocity Update (ZUPT) and hand-shake filters keep your location rock solid.
-    </p>
+    <!-- Active Dead Reckoning Banner -->
+    <div id="dr-banner" class="dr-banner hidden">
+      <span class="shield-badge">🛡️ S.A.F.A.R. IDR ACTIVE</span>
+      <span>GNSS Outage Detected — Inertial Dead Reckoning engaged</span>
+    </div>
   </div>
 
-  <!-- Replay Mode Controls -->
-  <div class="panel hidden" id="panel-replay">
-    <div class="replay-controls-row">
-      <div class="trip-selector-wrap">
-        <label>Benchmark Trip:</label>
-        <select id="trip-select"></select>
+  <!-- Floating Map Controls (Right Side) -->
+  <div class="map-controls">
+    <button id="btn-recenter" class="map-ctrl-btn active" title="Re-center on my location">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="#1a73e8"><path d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg>
+    </button>
+    <button id="btn-drop-pin" class="map-ctrl-btn" title="Tap map to drop pin">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="#5f6368"><path d="M14 4v5c0 1.12.37 2.16 1 3H9c.65-.86 1-1.9 1-3V4h4m3-2H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3V4h1c.55 0 1-.45 1-1s-.45-1-1-1z"/></svg>
+    </button>
+  </div>
+
+  <!-- Route ETA Floating Card (Appears when route is set) -->
+  <div id="route-card" class="route-card hidden">
+    <div class="route-card-main">
+      <div class="route-header">
+        <span class="route-title" id="route-dest-name">Destination</span>
+        <button id="btn-cancel-route" class="btn-cancel" title="Cancel Route">✕</button>
       </div>
-      <div class="playback-buttons">
-        <button id="btn-start-replay" class="primary-btn">Start Replay</button>
-        <button id="btn-pause-replay" disabled>Pause</button>
-        <div class="speed-multiplier-group">
-          <button class="speed-btn active" data-speed="1">1x</button>
-          <button class="speed-btn" data-speed="2">2x</button>
-          <button class="speed-btn" data-speed="4">4x</button>
-        </div>
+      <div class="route-meta">
+        <span class="route-time" id="route-eta">— mins</span>
+        <span class="route-dot">•</span>
+        <span class="route-dist" id="route-dist">— km</span>
+        <span class="route-dot">•</span>
+        <span class="route-fastest">Fastest Route (OSRM)</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Navigation HUD Bar -->
+  <div class="bottom-hud">
+    <div class="hud-item speed-item">
+      <span class="hud-sub">SPEED</span>
+      <div class="speed-number">
+        <span id="hud-speed">0.0</span>
+        <span class="speed-unit">km/h</span>
       </div>
     </div>
 
-    <!-- Replay Benchmark Dashboard -->
-    <div class="replay-benchmark-card">
-      <div class="replay-progress-wrap">
-        <div class="progress-bar-bg">
-          <div id="replay-progress-fill" class="progress-bar-fill"></div>
-        </div>
-        <div class="progress-time">
-          <span id="replay-phase-text">Phase: Ready</span>
-          <span id="replay-time-text">0s / 60s</span>
-        </div>
-      </div>
+    <div class="hud-divider"></div>
 
-      <div class="benchmark-stats-grid">
-        <div class="b-stat">
-          <span class="b-label">S.A.F.A.R. Drift</span>
-          <span class="b-val val-good" id="rep-safar-drift">—</span>
-        </div>
-        <div class="b-stat">
-          <span class="b-label">Naive Double-Int. Drift</span>
-          <span class="b-val val-bad" id="rep-naive-drift">—</span>
-        </div>
-        <div class="b-stat">
-          <span class="b-label">Drift Reduction</span>
-          <span class="b-val val-highlight" id="rep-reduction">—</span>
-        </div>
-        <div class="b-stat">
-          <span class="b-label">Distance Travelled</span>
-          <span class="b-val" id="rep-distance">—</span>
-        </div>
+    <div class="hud-item">
+      <span class="hud-sub">HEADING</span>
+      <div class="hud-val-row">
+        <svg id="hud-compass-needle" class="compass-icon" viewBox="0 0 24 24" width="18" height="18"><polygon points="12,2 17,20 12,16 7,20" fill="#1a73e8"/></svg>
+        <span id="hud-heading" class="hud-bold">N (0°)</span>
       </div>
     </div>
 
-    <div class="outage-toggle-pill" style="margin-top: 8px;">
-      <label class="switch">
-        <input type="checkbox" id="toggle-outage-replay" checked>
-        <span class="slider round"></span>
-      </label>
-      <span class="switch-label">Simulate GNSS Outage during replay</span>
+    <div class="hud-divider"></div>
+
+    <div class="hud-item">
+      <span class="hud-sub">CONFIDENCE</span>
+      <span id="hud-conf" class="hud-bold conf-high">98%</span>
     </div>
 
-    <div class="legend-row">
-      <span><span class="legend-dot dot-gt"></span> Ground Truth GPS (True Route)</span>
-      <span><span class="legend-dot dot-ai"></span> S.A.F.A.R. AI-Fused IDR</span>
-      <span><span class="legend-dot dot-naive"></span> Naive Integration (Uncorrected Drift)</span>
+    <div class="hud-divider"></div>
+
+    <div class="hud-item state-item">
+      <span class="hud-sub">MOTION</span>
+      <span id="hud-motion" class="motion-pill">Stationary (ZUPT)</span>
+    </div>
+  </div>
+
+  <!-- iOS / Sensor Permission Modal (if required) -->
+  <div id="perm-modal" class="perm-modal hidden">
+    <div class="modal-card">
+      <div class="modal-icon">🧭</div>
+      <h3>Enable Compass &amp; Sensors</h3>
+      <p>S.A.F.A.R. needs device orientation &amp; motion sensors to show your real-time heading beam and track your position during GPS blackouts.</p>
+      <button id="btn-allow-sensors" class="modal-btn">Enable Sensors</button>
     </div>
   </div>
 

@@ -1,258 +1,238 @@
 // ============================================================
 // S.A.F.A.R. — Sensor-Aided Fusion for Accurate Routing
-// Intelligent Dead Reckoning Frontend (SIH 26168 | Team DietCode)
+// Intelligent Dead Reckoning & Navigation Engine (SIH 26168)
+// Team DietCode
 // ============================================================
 
-const map = L.map('map').setView([28.6139, 77.2090], 14); // New Delhi default
+// ------------------------------------------------------------
+// 1. Map & Custom Marker Initialization
+// ------------------------------------------------------------
+const DEFAULT_CENTER = [28.6139, 77.2090]; // New Delhi default
+const map = L.map('map', {
+  zoomControl: false, // Clean mobile-first UI
+  attributionControl: false,
+}).setView(DEFAULT_CENTER, 15);
+
+// OpenStreetMap Standard Tiles
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors | S.A.F.A.R. Team DietCode',
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap | S.A.F.A.R. Team DietCode',
 }).addTo(map);
 
-// Google Maps Style Blue Dot Marker with Heading Beam Cone
-function createGmapsMarker() {
-  const html = `
+// Add compact attribution at bottom-right
+L.control.attribution({ position: 'bottomright', prefix: 'S.A.F.A.R.' }).addTo(map);
+
+// Google Maps Style Blue Dot Marker with 110px Flashlight Heading Beam Cone
+const userLocationIcon = L.divIcon({
+  className: 'gmaps-marker-wrapper',
+  html: `
     <div class="gmaps-user-marker">
       <div class="gmaps-heading-cone" id="gmaps-cone">
-        <svg viewBox="0 0 90 90" width="90" height="90">
+        <svg viewBox="0 0 110 110" width="110" height="110">
           <defs>
-            <radialGradient id="beamGrad" cx="45" cy="45" r="42" fx="45" fy="45" gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stop-color="#2979ff" stop-opacity="0.65"/>
-              <stop offset="60%" stop-color="#2979ff" stop-opacity="0.22"/>
+            <radialGradient id="beamGrad" cx="55" cy="55" r="50" fx="55" fy="55" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#1a73e8" stop-opacity="0.80"/>
+              <stop offset="35%" stop-color="#2979ff" stop-opacity="0.45"/>
+              <stop offset="70%" stop-color="#2979ff" stop-opacity="0.18"/>
               <stop offset="100%" stop-color="#2979ff" stop-opacity="0.0"/>
             </radialGradient>
           </defs>
-          <!-- 55-degree flashlight beam pointing upward (North / 0 deg) -->
-          <path d="M 45 45 L 25 8.5 A 42 42 0 0 1 65 8.5 Z" fill="url(#beamGrad)" />
+          <!-- 60-degree flashlight beam pointing upward (North / 0 deg) -->
+          <path d="M 55 55 L 30 11.7 A 50 50 0 0 1 80 11.7 Z" fill="url(#beamGrad)" />
         </svg>
       </div>
       <div class="gmaps-pulse-ring"></div>
       <div class="gmaps-blue-dot"></div>
     </div>
-  `;
-  return L.marker([28.6139, 77.2090], {
-    icon: L.divIcon({
-      className: 'gmaps-marker-wrapper',
-      html: html,
-      iconSize: [90, 90],
-      iconAnchor: [45, 45],
-    }),
-    zIndexOffset: 1000,
-  });
-}
+  `,
+  iconSize: [110, 110],
+  iconAnchor: [55, 55],
+});
 
-function createCircleDot(color) {
-  return L.circleMarker([0, 0], {
-    radius: 8, color: '#ffffff', weight: 2.5, fillColor: color, fillOpacity: 1
-  });
-}
+// Destination Pin Drop Marker (Google Maps Red Pin with Shadow & Bounce)
+const destPinIcon = L.divIcon({
+  className: 'gmaps-marker-wrapper',
+  html: `
+    <div class="gmaps-dest-pin">
+      <svg viewBox="0 0 24 24" width="38" height="38">
+        <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="#ea4335"/>
+        <circle cx="12" cy="9" r="2.8" fill="#ffffff"/>
+      </svg>
+    </div>
+  `,
+  iconSize: [38, 38],
+  iconAnchor: [19, 38],
+  popupAnchor: [0, -38],
+});
 
-// Map Layers
-const liveMarker = createGmapsMarker();
-const destMarker = createCircleDot('#ff3d00'); // Destination marker (red)
-const routeLine = L.polyline([], { color: '#00e676', weight: 5, opacity: 0.85 }).addTo(map);
-const liveTrail = L.polyline([], { color: '#2979ff', weight: 4, opacity: 0.8 });
+// Initialize User Marker immediately on map
+const liveMarker = L.marker(DEFAULT_CENTER, {
+  icon: userLocationIcon,
+  zIndexOffset: 1000,
+}).addTo(map);
 
-// Replay Layers
-const gtLine = L.polyline([], { color: '#00e676', weight: 4, opacity: 0.85 });
-const naiveLine = L.polyline([], { color: '#ff3d00', weight: 3, opacity: 0.75, dashArray: '6 6' });
-const aiLine = L.polyline([], { color: '#00d2ff', weight: 4, opacity: 0.9 });
-const gtMarker = createCircleDot('#00e676');
-const naiveMarker = createCircleDot('#ff3d00');
-const aiMarker = createCircleDot('#00d2ff');
+// Route Polyline (OSRM Driving Route)
+const routeLine = L.polyline([], {
+  color: '#1a73e8',
+  weight: 6,
+  opacity: 0.9,
+  lineJoin: 'round',
+  lineCap: 'round',
+}).addTo(map);
 
-let currentHeadingDeg = 0;
+// Breadcrumb Trail for Dead Reckoning Tracking
+const liveTrail = L.polyline([], {
+  color: '#4285f4',
+  weight: 4,
+  opacity: 0.5,
+  dashArray: '4 6',
+}).addTo(map);
+
+// Destination Marker
+let destMarker = null;
+let selectedDestination = null;
+
+// ------------------------------------------------------------
+// 2. Real-time Compass & Heading Cone Rotation
+// ------------------------------------------------------------
 let latestCompassHeading = null;
+let currentRotationDeg = 0;
 
-function updateConeRotation(deg) {
+function updateHeadingUI(deg) {
   if (deg == null || isNaN(deg)) return;
-  currentHeadingDeg = deg;
+  currentRotationDeg = Math.round((deg % 360 + 360) % 360);
+
+  // 1. Rotate the Google Maps flashlight beam on the user marker
   const cone = document.getElementById('gmaps-cone');
   if (cone) {
-    cone.style.transform = `rotate(${deg}deg)`;
+    cone.style.transform = `rotate(${currentRotationDeg}deg)`;
   }
+
+  // 2. Rotate the compass needle icon in the bottom HUD
+  const needle = document.getElementById('hud-compass-needle');
+  if (needle) {
+    needle.style.transform = `rotate(${currentRotationDeg}deg)`;
+  }
+
+  // 3. Update the text in the bottom HUD
   const headingEl = document.getElementById('hud-heading');
   if (headingEl) {
-    headingEl.textContent = degToCompass(deg);
+    headingEl.textContent = degToCompass(currentRotationDeg);
   }
 }
 
 function degToCompass(deg) {
-  if (deg == null || isNaN(deg)) return '—';
-  const val = Math.floor((deg / 22.5) + 0.5);
-  const arr = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
-  return `${arr[val % 16]} (${Math.round(deg)}°)`;
+  const points = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+  const idx = Math.floor((deg / 22.5) + 0.5) % 16;
+  return `${points[idx]} (${Math.round(deg)}°)`;
 }
 
-// Update HUD Dashboard
-function updateHUD(data) {
-  const speedEl = document.getElementById('hud-speed');
-  const confEl = document.getElementById('hud-conf');
-  const motionEl = document.getElementById('hud-motion');
-  const pillEl = document.getElementById('live-indicator');
-  const indText = document.getElementById('indicator-text');
-  const banner = document.getElementById('status-banner');
+// Mobile Orientation Handler (iOS Safari & Android Chrome)
+function handleDeviceOrientation(e) {
+  let heading = null;
 
-  // Speed
-  if (data.speed_kmh != null) {
-    speedEl.innerHTML = `${data.speed_kmh.toFixed(1)} <span class="unit">km/h</span>`;
-  } else {
-    speedEl.innerHTML = `0.0 <span class="unit">km/h</span>`;
+  // iOS Safari: webkitCompassHeading is absolute magnetic North (0 = North, 90 = East)
+  if (e.webkitCompassHeading !== undefined && e.webkitCompassHeading !== null) {
+    heading = e.webkitCompassHeading;
+  }
+  // Android Chrome: deviceorientationabsolute or absolute event
+  else if (e.alpha !== null && e.alpha !== undefined) {
+    // Android alpha is counter-clockwise rotation from North
+    heading = (360 - e.alpha) % 360;
   }
 
-  // Heading from fusion if no live compass
-  if (data.heading_deg != null && latestCompassHeading == null) {
-    updateConeRotation(data.heading_deg);
-  }
+  if (heading !== null && !isNaN(heading)) {
+    // Screen orientation offset (portrait vs landscape)
+    const screenAngle = (window.orientation || (screen.orientation && screen.orientation.angle) || 0);
+    heading = (heading + screenAngle + 360) % 360;
 
-  // Confidence
-  const conf = data.confidence != null ? data.confidence : 95;
-  confEl.innerHTML = `${conf}<span class="unit">%</span>`;
-  if (conf > 75) {
-    confEl.style.color = 'var(--accent-green)';
-  } else if (conf > 50) {
-    confEl.style.color = 'var(--accent-orange)';
-  } else {
-    confEl.style.color = 'var(--accent-red)';
-  }
-
-  // Motion State
-  const stateLabels = {
-    'STATIONARY': 'Stationary (ZUPT)',
-    'HAND_DISTURBANCE': 'Disturbance Filtered',
-    'VEHICLE_DRIVING': 'Vehicle Kinematics',
-  };
-  motionEl.textContent = stateLabels[data.motion_state] || (data.motion_state || 'Stationary (ZUPT)');
-
-  // Mode and Banner
-  if (data.mode === 'DR') {
-    pillEl.className = 'live-pill status-dr';
-    indText.textContent = 'Dead Reckoning (IDR)';
-    banner.classList.remove('hidden');
-  } else if (data.mode === 'GNSS') {
-    pillEl.className = 'live-pill status-gnss';
-    indText.textContent = 'GNSS Available';
-    banner.classList.add('hidden');
-  } else {
-    pillEl.className = 'live-pill';
-    indText.textContent = 'Waiting for Fix';
-    banner.classList.add('hidden');
+    latestCompassHeading = heading;
+    updateHeadingUI(heading);
   }
 }
 
-function haversineM(lat1, lon1, lat2, lon2) {
-  const R = 6371000, toRad = Math.PI / 180;
-  const dLat = (lat2 - lat1) * toRad, dLon = (lon2 - lon1) * toRad;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
+// Attach compass listeners immediately
+function attachOrientationListeners() {
+  if ('ondeviceorientationabsolute' in window) {
+    window.addEventListener('deviceorientationabsolute', handleDeviceOrientation, true);
+  }
+  window.addEventListener('deviceorientation', handleDeviceOrientation, true);
 }
 
-// ============================================================
-// Tabs
-// ============================================================
-document.getElementById('tab-replay').onclick = () => switchTab('replay');
-document.getElementById('tab-live').onclick = () => switchTab('live');
+// Check iOS 13+ sensor permissions
+function checkSensorPermissions() {
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // Show iOS permission modal
+    const modal = document.getElementById('perm-modal');
+    if (modal) modal.classList.remove('hidden');
 
-function switchTab(which) {
-  document.getElementById('tab-replay').classList.toggle('active', which === 'replay');
-  document.getElementById('tab-live').classList.toggle('active', which === 'live');
-  document.getElementById('panel-replay').classList.toggle('hidden', which !== 'replay');
-  document.getElementById('panel-live').classList.toggle('hidden', which !== 'live');
-
-  if (which === 'replay') {
-    liveMarker.remove(); destMarker.remove(); routeLine.setLatLngs([]); liveTrail.remove();
-    gtLine.addTo(map); naiveLine.addTo(map); aiLine.addTo(map);
-  } else {
-    gtLine.remove(); naiveLine.remove(); aiLine.remove();
-    gtLine.setLatLngs([]); naiveLine.setLatLngs([]); aiLine.setLatLngs([]);
-    if (haveEverFixed) {
-      liveMarker.addTo(map);
-      liveTrail.addTo(map);
+    const btnAllow = document.getElementById('btn-allow-sensors');
+    if (btnAllow) {
+      btnAllow.onclick = async () => {
+        try {
+          const res = await DeviceOrientationEvent.requestPermission();
+          if (res === 'granted') {
+            attachOrientationListeners();
+          }
+        } catch (err) {
+          console.warn('Orientation permission notice:', err);
+        }
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+          try {
+            await DeviceMotionEvent.requestPermission();
+          } catch (_) {}
+        }
+        modal.classList.add('hidden');
+      };
     }
+  } else {
+    // Android, PC, or older iOS — attach immediately
+    attachOrientationListeners();
   }
 }
-switchTab('live');
 
-// ============================================================
-// Interactive Map Click-to-Pinpoint Destination
-// ============================================================
-let pinModeActive = false;
+// Auto-request on first screen touch as fallback for iOS
+window.addEventListener('touchstart', function onFirstTouch() {
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().then(res => {
+      if (res === 'granted') attachOrientationListeners();
+    }).catch(() => {});
+  }
+  window.removeEventListener('touchstart', onFirstTouch);
+}, { once: true });
 
-document.getElementById('btn-pin-mode').onclick = () => {
-  pinModeActive = !pinModeActive;
-  document.getElementById('btn-pin-mode').classList.toggle('active', pinModeActive);
-};
+checkSensorPermissions();
 
-map.on('click', (e) => {
-  setDestination(e.latlng.lat, e.latlng.lng, `Pinned (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)})`);
-});
-
-function setDestination(lat, lon, label) {
-  selectedDestination = { lat, lon, label };
-  destMarker.setLatLng([lat, lon]).addTo(map);
-  document.getElementById('destination-search').value = label;
-  document.getElementById('btn-clear-search').classList.remove('hidden');
-  drawRoute();
-}
-
-document.getElementById('btn-clear-route').onclick = clearRoute;
-document.getElementById('btn-clear-search').onclick = () => {
-  document.getElementById('destination-search').value = '';
-  document.getElementById('btn-clear-search').classList.add('hidden');
-  clearRoute();
-};
-
-function clearRoute() {
-  selectedDestination = null;
-  destMarker.remove();
-  routeLine.setLatLngs([]);
-  document.getElementById('route-summary-card').classList.add('hidden');
-}
-
-// Quick Destination Chips
-document.querySelectorAll('.chip-btn').forEach(btn => {
-  btn.onclick = async () => {
-    const q = btn.dataset.query;
-    document.getElementById('destination-search').value = q;
-    document.getElementById('btn-clear-search').classList.remove('hidden');
-    await performSearch(q);
-  };
-});
-
-// ============================================================
-// Live Navigation Mode
-// ============================================================
-let liveSessionId = null;
-let liveTimer = null;
-let tracking = false;
-let isDispatching = false;
-
-let latestAccel = null;
+// ------------------------------------------------------------
+// 3. Motion Sensors (IMU Accel + Gyro) & Live S.A.F.A.R. Engine
+// ------------------------------------------------------------
+let latestAccel = { x: 0, y: 0, z: 9.81 };
 let latestGravityEst = { x: 0, y: 0, z: 9.81 };
 let latestGyro = { yaw: 0, pitch: 0, roll: 0 };
+let hasMotionSensor = false;
 
-let latestGps = null;
-let lastFixTime = 0;
-let haveEverFixed = false;
-let gpsErrorOccurred = false;
-const MAX_ACCEPTABLE_ACCURACY_M = 80;
-
-function onDeviceMotion(e) {
+function handleDeviceMotion(e) {
   const a = e.accelerationIncludingGravity;
   if (!a || a.x == null) return;
+  hasMotionSensor = true;
 
   const lin = e.acceleration;
   if (lin && lin.x != null) {
-    // Hardware-fused linear acceleration from smartphone IMU chip!
-    latestAccel = { x: a.x, y: a.y, z: a.z };
-    latestGravityEst = { x: a.x - lin.x, y: a.y - lin.y, z: a.z - lin.z };
+    // Hardware-isolated linear acceleration from smartphone IMU chip
+    latestAccel = { x: a.x || 0, y: a.y || 0, z: a.z || 0 };
+    latestGravityEst = {
+      x: (a.x || 0) - (lin.x || 0),
+      y: (a.y || 0) - (lin.y || 0),
+      z: (a.z || 0) - (lin.z || 0),
+    };
   } else {
-    // Calibrated 0.5Hz low-pass filter
-    latestAccel = { x: a.x, y: a.y, z: a.z };
+    // Calibrated 0.5Hz low-pass gravity filter
+    latestAccel = { x: a.x || 0, y: a.y || 0, z: a.z || 0 };
     const alpha = 0.94;
     latestGravityEst = {
-      x: alpha * latestGravityEst.x + (1 - alpha) * a.x,
-      y: alpha * latestGravityEst.y + (1 - alpha) * a.y,
-      z: alpha * latestGravityEst.z + (1 - alpha) * a.z,
+      x: alpha * latestGravityEst.x + (1 - alpha) * (a.x || 0),
+      y: alpha * latestGravityEst.y + (1 - alpha) * (a.y || 0),
+      z: alpha * latestGravityEst.z + (1 - alpha) * (a.z || 0),
     };
   }
 
@@ -265,340 +245,398 @@ function onDeviceMotion(e) {
     };
   }
 }
+window.addEventListener('devicemotion', handleDeviceMotion, true);
 
-// Google Maps Heading Light Cone via Device Orientation
-function onDeviceOrientation(e) {
-  let heading = null;
-  if (e.webkitCompassHeading != null) {
-    // iOS Safari provides exact compass heading (0 = North)
-    heading = e.webkitCompassHeading;
-  } else if (e.alpha != null) {
-    // Android Chrome (alpha: 0 to 360)
-    heading = 360 - e.alpha;
-  }
-  if (heading != null) {
-    latestCompassHeading = heading;
-    updateConeRotation(heading);
-  }
-}
+// ------------------------------------------------------------
+// 4. Geolocation (GNSS GPS Tracking)
+// ------------------------------------------------------------
+let latestGps = null;
+let hasGpsFix = false;
+let userHasPanned = false;
+const MAX_ACCEPTABLE_ACCURACY_M = 100;
 
 function onGeoSuccess(pos) {
   const acc = pos.coords.accuracy;
   if (acc != null && acc > MAX_ACCEPTABLE_ACCURACY_M) return;
 
-  latestGps = {
-    lat: pos.coords.latitude,
-    lon: pos.coords.longitude,
-    speed: pos.coords.speed,
-    heading: pos.coords.heading,
-    accuracy: acc,
-  };
-  lastFixTime = Date.now();
-  gpsErrorOccurred = false;
+  const lat = pos.coords.latitude;
+  const lon = pos.coords.longitude;
+  const speed = pos.coords.speed;
+  const heading = pos.coords.heading;
 
-  if (!haveEverFixed) {
-    haveEverFixed = true;
-    map.setView([latestGps.lat, latestGps.lon], 16);
-    liveMarker.setLatLng([latestGps.lat, latestGps.lon]).addTo(map);
-    liveTrail.addTo(map);
-    document.getElementById('btn-recenter').disabled = false;
+  latestGps = { lat, lon, speed, heading, accuracy: acc };
+
+  if (!hasGpsFix) {
+    hasGpsFix = true;
+    map.setView([lat, lon], 16, { animate: true });
+    liveMarker.setLatLng([lat, lon]);
+    liveTrail.setLatLngs([[lat, lon]]);
+  }
+
+  // If phone has no compass hardware, fallback to GPS heading if moving
+  if (latestCompassHeading == null && heading != null && !isNaN(heading) && (speed || 0) > 1.0) {
+    updateHeadingUI(heading);
   }
 }
 
 function onGeoError(err) {
-  console.warn('Geolocation error:', err.message);
-  gpsErrorOccurred = true;
+  console.warn('Geolocation notice:', err.message);
 }
 
+if (navigator.geolocation) {
+  navigator.geolocation.watchPosition(onGeoSuccess, onGeoError, {
+    enableHighAccuracy: true,
+    maximumAge: 1000,
+    timeout: 10000,
+  });
+}
+
+// Detect manual user drag so we don't snap the map back abruptly
+map.on('dragstart', () => {
+  userHasPanned = true;
+  document.getElementById('btn-recenter').classList.remove('active');
+});
+
+// Re-center Button
 document.getElementById('btn-recenter').onclick = () => {
-  if (latestGps) {
-    map.setView([latestGps.lat, latestGps.lon], 17);
-  }
+  userHasPanned = false;
+  document.getElementById('btn-recenter').classList.add('active');
+  const target = latestGps ? [latestGps.lat, latestGps.lon] : liveMarker.getLatLng();
+  map.setView(target, 16, { animate: true });
 };
 
-document.getElementById('btn-start-live').onclick = async () => {
-  if (tracking) return;
+// ------------------------------------------------------------
+// 5. Backend Live Session & 10Hz Dead Reckoning Loop
+// ------------------------------------------------------------
+let liveSessionId = null;
+let isDispatching = false;
+let isSimulatedOutage = false;
 
-  // iOS 13+ Motion permission
-  if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-    try {
-      const perm = await DeviceMotionEvent.requestPermission();
-      if (perm !== 'granted') {
-        alert('Motion sensor permission is required for S.A.F.A.R. dead-reckoning.');
-        return;
-      }
-    } catch (err) {
-      alert('Could not request motion permission: ' + err);
-      return;
-    }
-  }
-
-  // iOS 13+ Orientation permission
-  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-    try {
-      await DeviceOrientationEvent.requestPermission();
-    } catch (_) {}
-  }
-
-  window.addEventListener('devicemotion', onDeviceMotion);
-  window.addEventListener('deviceorientation', onDeviceOrientation);
-
-  if (!navigator.geolocation) {
-    alert('This device does not support geolocation.');
-    return;
-  }
-  navigator.geolocation.watchPosition(onGeoSuccess, onGeoError, {
-    enableHighAccuracy: true, maximumAge: 1000, timeout: 8000,
-  });
-
+async function initLiveBackendSession() {
   try {
     const res = await fetch('/api/live/session/start', { method: 'POST' });
-    const data = await res.json();
-    liveSessionId = data.session_id;
+    if (res.ok) {
+      const data = await res.json();
+      liveSessionId = data.session_id;
+    }
   } catch (err) {
-    alert('Failed to connect to S.A.F.A.R. backend engine: ' + err.message);
+    console.warn('Backend live session init:', err.message);
+  }
+}
+initLiveBackendSession();
+
+// Outage Toggle Switch
+const toggleOutage = document.getElementById('toggle-outage');
+if (toggleOutage) {
+  toggleOutage.onchange = () => {
+    isSimulatedOutage = toggleOutage.checked;
+    updateModeDisplay(isSimulatedOutage ? 'DR' : 'GNSS');
+  };
+}
+
+function updateModeDisplay(mode) {
+  const badge = document.getElementById('mode-badge');
+  const text = document.getElementById('mode-text');
+  const banner = document.getElementById('dr-banner');
+
+  if (mode === 'DR') {
+    badge.className = 'mode-badge mode-dr';
+    text.textContent = 'Dead Reckoning (IDR)';
+    banner.classList.remove('hidden');
+  } else {
+    badge.className = 'mode-badge mode-gnss';
+    text.textContent = 'GNSS Active';
+    banner.classList.add('hidden');
+  }
+}
+
+// Update HUD Dashboard
+function updateHUD(data) {
+  const speedEl = document.getElementById('hud-speed');
+  const confEl = document.getElementById('hud-conf');
+  const motionEl = document.getElementById('hud-motion');
+
+  // Speed
+  if (data.speed_kmh != null) {
+    speedEl.textContent = data.speed_kmh.toFixed(1);
+  }
+
+  // Heading fallback if no live compass hardware event
+  if (latestCompassHeading == null && data.heading_deg != null) {
+    updateHeadingUI(data.heading_deg);
+  }
+
+  // Confidence Level
+  const conf = data.confidence != null ? data.confidence : 95;
+  confEl.textContent = `${conf}%`;
+  confEl.className = 'hud-bold ' + (conf >= 75 ? 'conf-high' : conf >= 50 ? 'conf-med' : 'conf-low');
+
+  // Motion State
+  const motionMap = {
+    'STATIONARY': 'Stationary (ZUPT)',
+    'HAND_DISTURBANCE': 'Disturbance Filtered',
+    'VEHICLE_DRIVING': 'Vehicle Kinematics',
+  };
+  motionEl.textContent = motionMap[data.motion_state] || (data.motion_state || 'Stationary (ZUPT)');
+
+  // Mode Display
+  updateModeDisplay(data.mode);
+}
+
+// 10Hz Telemetry & S.A.F.A.R. Fusion Loop
+setInterval(async () => {
+  if (!liveSessionId || isDispatching) return;
+
+  isDispatching = true;
+  try {
+    const isOutage = isSimulatedOutage || !hasGpsFix;
+    const body = {
+      accel: latestAccel,
+      gravity: latestGravityEst,
+      gyro: latestGyro,
+      gps: (!isOutage && latestGps) ? latestGps : null,
+      simulate_outage: isSimulatedOutage,
+      dt: 0.1,
+    };
+
+    const res = await fetch(`/api/live/session/${liveSessionId}/sample`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.lat != null && data.lon != null) {
+        liveMarker.setLatLng([data.lat, data.lon]);
+        liveTrail.addLatLng([data.lat, data.lon]);
+
+        if (!userHasPanned) {
+          map.panTo([data.lat, data.lon], { animate: true, duration: 0.1 });
+        }
+      }
+      updateHUD(data);
+    }
+  } catch (err) {
+    console.warn('Live sample sync:', err.message);
+  } finally {
+    isDispatching = false;
+  }
+}, 100);
+
+// ------------------------------------------------------------
+// 6. Destination Search Autocomplete & Pin-Drop Routing
+// ------------------------------------------------------------
+const searchInput = document.getElementById('destination-search');
+const suggestionsBox = document.getElementById('suggestions-box');
+const btnClearSearch = document.getElementById('btn-clear-search');
+const routeCard = document.getElementById('route-card');
+const btnCancelRoute = document.getElementById('btn-cancel-route');
+const btnDropPin = document.getElementById('btn-drop-pin');
+
+let isPinModeActive = false;
+let searchDebounceTimer = null;
+
+// Toggle Tap-to-Drop Pin Mode
+btnDropPin.onclick = () => {
+  isPinModeActive = !isPinModeActive;
+  btnDropPin.classList.toggle('active', isPinModeActive);
+  map.getContainer().style.cursor = isPinModeActive ? 'crosshair' : '';
+};
+
+// Map Click / Tap Handler: Pinpoint Any Destination on Map
+map.on('click', async (e) => {
+  const lat = e.latlng.lat;
+  const lon = e.latlng.lng;
+  const label = `Pinned (${lat.toFixed(4)}, ${lon.toFixed(4)})`;
+
+  setDestination(lat, lon, label);
+
+  // Optional: Reverse geocode to get real street name
+  try {
+    const revUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`;
+    const res = await fetch(revUrl);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.display_name) {
+        const placeName = data.display_name.split(',')[0].trim();
+        document.getElementById('route-dest-name').textContent = placeName;
+        searchInput.value = placeName;
+      }
+    }
+  } catch (_) {}
+});
+
+// Set Destination & Calculate Route
+async function setDestination(lat, lon, label) {
+  selectedDestination = { lat, lon, label };
+
+  // Update or create Red Destination Pin
+  if (!destMarker) {
+    destMarker = L.marker([lat, lon], { icon: destPinIcon, zIndexOffset: 900 }).addTo(map);
+  } else {
+    destMarker.setLatLng([lat, lon]).addTo(map);
+  }
+
+  // Update Search input & clear button
+  searchInput.value = label;
+  btnClearSearch.classList.remove('hidden');
+  suggestionsBox.classList.add('hidden');
+
+  // Compute driving route
+  await calculateRoute();
+}
+
+// Compute driving route using OSRM
+async function calculateRoute() {
+  if (!selectedDestination) return;
+
+  const origin = latestGps ? latestGps : { lat: liveMarker.getLatLng().lat, lon: liveMarker.getLatLng().lng };
+  const originLat = origin.lat;
+  const originLon = origin.lon;
+  const destLat = selectedDestination.lat;
+  const destLon = selectedDestination.lon;
+
+  const url = `https://router.project-osrm.org/route/v1/driving/${originLon},${originLat};${destLon},${destLat}?overview=full&geometries=geojson`;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Route service unavailable');
+    const data = await res.json();
+
+    if (!data.routes || !data.routes.length) {
+      console.warn('No routes found between points.');
+      return;
+    }
+
+    const route = data.routes[0];
+    const coords = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    routeLine.setLatLngs(coords);
+
+    // Zoom map to fit the route nicely
+    map.fitBounds(routeLine.getBounds(), { padding: [60, 60] });
+
+    // Show Route ETA Card
+    const distanceKm = (route.distance / 1000).toFixed(1);
+    const durationMin = Math.max(1, Math.round(route.duration / 60));
+
+    document.getElementById('route-dest-name').textContent = selectedDestination.label;
+    document.getElementById('route-eta').textContent = `${durationMin} mins`;
+    document.getElementById('route-dist').textContent = `${distanceKm} km`;
+    routeCard.classList.remove('hidden');
+  } catch (err) {
+    console.warn('Route calculation notice:', err.message);
+  }
+}
+
+// Cancel Route & Clear Markers
+function clearCurrentRoute() {
+  selectedDestination = null;
+  if (destMarker) destMarker.remove();
+  routeLine.setLatLngs([]);
+  routeCard.classList.add('hidden');
+  searchInput.value = '';
+  btnClearSearch.classList.add('hidden');
+  suggestionsBox.classList.add('hidden');
+}
+
+btnCancelRoute.onclick = clearCurrentRoute;
+btnClearSearch.onclick = clearCurrentRoute;
+
+// Search Autocomplete (Nominatim with 250ms Debounce)
+searchInput.addEventListener('input', (e) => {
+  const query = e.target.value.trim();
+  btnClearSearch.classList.toggle('hidden', query.length === 0);
+
+  if (query.length < 2) {
+    suggestionsBox.innerHTML = '';
+    suggestionsBox.classList.add('hidden');
     return;
   }
 
-  tracking = true;
-  document.getElementById('btn-start-live').disabled = true;
-  document.getElementById('btn-start-live').innerHTML = '<span class="pulse-icon"></span> Navigation Active';
-
-  // 10Hz sampling loop with non-blocking dispatch
-  liveTimer = setInterval(async () => {
-    if (!latestAccel || isDispatching) return;
-
-    isDispatching = true;
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(async () => {
     try {
-      const manualOutage = document.getElementById('toggle-outage-live').checked;
-      const isOutage = manualOutage || gpsErrorOccurred || !haveEverFixed;
-      const useGps = haveEverFixed && !isOutage;
+      let url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(query)}`;
+      if (latestGps) {
+        url += `&viewbox=${latestGps.lon - 0.4},${latestGps.lat + 0.4},${latestGps.lon + 0.4},${latestGps.lat - 0.4}`;
+      }
 
-      const body = {
-        accel: latestAccel,
-        gravity: latestGravityEst,
-        gyro: latestGyro,
-        gps: useGps ? latestGps : null,
-        simulate_outage: isOutage,
-        dt: 0.1,
-      };
+      const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+      if (!res.ok) return;
+      const results = await res.json();
 
-      const r = await fetch(`/api/live/session/${liveSessionId}/sample`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const d = await r.json();
-
-      if (d.mode === 'NO_FIX' || d.lat == null) {
-        updateHUD({ mode: 'NO_FIX', speed_kmh: 0.0, heading_deg: null, confidence: 15, motion_state: 'Waiting for GPS' });
+      if (!results || results.length === 0) {
+        suggestionsBox.innerHTML = `<div class="suggestion-item"><div class="sugg-text"><span class="sugg-sub">No places found for "${query}"</span></div></div>`;
+        suggestionsBox.classList.remove('hidden');
         return;
       }
 
-      liveMarker.setLatLng([d.lat, d.lon]).addTo(map);
-      liveTrail.addLatLng([d.lat, d.lon]);
-      map.panTo([d.lat, d.lon]);
+      suggestionsBox.innerHTML = results.map((item, idx) => {
+        const parts = item.display_name.split(',');
+        const main = parts[0].trim();
+        const sub = parts.slice(1, 4).join(',').trim();
+        return `
+          <div class="suggestion-item" data-idx="${idx}">
+            <div class="sugg-pin-icon">📍</div>
+            <div class="sugg-text">
+              <span class="sugg-main">${main}</span>
+              <span class="sugg-sub">${sub || item.display_name}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
 
-      updateHUD(d);
+      suggestionsBox.classList.remove('hidden');
+
+      // Bind click handlers to each suggestion
+      suggestionsBox.querySelectorAll('.suggestion-item').forEach(el => {
+        el.onclick = () => {
+          const idx = parseInt(el.dataset.idx, 10);
+          const r = results[idx];
+          if (!r) return;
+          const mainName = r.display_name.split(',')[0].trim();
+          setDestination(parseFloat(r.lat), parseFloat(r.lon), mainName);
+        };
+      });
     } catch (err) {
-      console.warn('Live sample sync error:', err);
-    } finally {
-      isDispatching = false;
+      console.warn('Search autocomplete error:', err.message);
     }
-  }, 100);
-};
+  }, 250);
+});
 
-// ============================================================
-// Destination search (Nominatim) + Routing (OSRM)
-// ============================================================
-let selectedDestination = null;
-
-async function geocode(query) {
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(query)}`;
-  const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
-  if (!res.ok) throw new Error('Geocoding failed');
-  return res.json();
-}
-
-async function performSearch(q) {
-  if (!q) return;
-  let results;
-  try {
-    results = await geocode(q);
-  } catch (e) {
-    alert('Search failed: ' + e.message);
-    return;
-  }
-  const box = document.getElementById('geocode-results');
-  if (!results.length) {
-    box.innerHTML = '<div class="geocode-item">No results found.</div>';
-    box.classList.remove('hidden');
-    return;
-  }
-  box.innerHTML = results.map((r, i) =>
-    `<div class="geocode-item" data-i="${i}">${r.display_name}</div>`
-  ).join('');
-  box.classList.remove('hidden');
-  box.querySelectorAll('.geocode-item[data-i]').forEach(el => {
-    el.onclick = () => {
-      const r = results[parseInt(el.dataset.i, 10)];
-      setDestination(parseFloat(r.lat), parseFloat(r.lon), r.display_name);
-      box.classList.add('hidden');
-    };
-  });
-}
-
-document.getElementById('btn-route').onclick = () => {
-  const q = document.getElementById('destination-search').value.trim();
-  performSearch(q);
-};
-
-async function drawRoute() {
-  if (!selectedDestination) return;
-  const origin = latestGps ? latestGps : { lat: 28.6139, lon: 77.2090 };
-  const { lat: olat, lon: olon } = origin;
-  const { lat: dlat, lon: dlon } = selectedDestination;
-
-  const url = `https://router.project-osrm.org/route/v1/driving/${olon},${olat};${dlon},${dlat}?overview=full&geometries=geojson`;
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-    if (!data.routes || !data.routes.length) {
-      return;
+// Search on Enter key
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const firstItem = suggestionsBox.querySelector('.suggestion-item');
+    if (firstItem) {
+      firstItem.click();
     }
-    const route = data.routes[0];
-    const coords = route.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-    routeLine.setLatLngs(coords).addTo(map);
-    map.fitBounds(routeLine.getBounds(), { padding: [40, 40] });
-
-    // Show Route Summary Card
-    const distanceKm = (route.distance / 1000).toFixed(1);
-    const durationMin = Math.round(route.duration / 60);
-    document.getElementById('route-eta').textContent = `${durationMin} mins`;
-    document.getElementById('route-distance').textContent = `${distanceKm} km driving`;
-    document.getElementById('route-summary-card').classList.remove('hidden');
-  } catch (e) {
-    console.warn('Routing service notice:', e.message);
   }
-}
+});
 
-// ============================================================
-// Benchmark Replay Mode
-// ============================================================
-let replayTimer = null;
-let replaySessionId = null;
-let replayIntervalMs = 100;
+// Quick Category Chips (Petrol Pump, Hospital, Station, Metro, Airport)
+document.querySelectorAll('.chip-item').forEach(chip => {
+  chip.onclick = async () => {
+    const category = chip.dataset.q;
+    searchInput.value = category;
+    btnClearSearch.classList.remove('hidden');
 
-async function loadTrips() {
-  try {
-    const res = await fetch('/api/replay/trips');
-    const trips = await res.json();
-    const sel = document.getElementById('trip-select');
-    sel.innerHTML = trips.map(t => `<option value="${t.id}">${t.label}</option>`).join('');
-  } catch (err) {
-    console.error('Failed to load trips:', err);
-  }
-}
-loadTrips();
+    try {
+      const origin = latestGps ? latestGps : { lat: liveMarker.getLatLng().lat, lon: liveMarker.getLatLng().lng };
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(category)}&viewbox=${origin.lon - 0.2},${origin.lat + 0.2},${origin.lon + 0.2},${origin.lat - 0.2}`;
 
-// Speed multiplier buttons (1x, 2x, 4x)
-document.querySelectorAll('.speed-btn').forEach(btn => {
-  btn.onclick = () => {
-    document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const mult = parseInt(btn.dataset.speed, 10);
-    replayIntervalMs = Math.round(100 / mult);
-    if (replayTimer) {
-      clearInterval(replayTimer);
-      runReplayLoop();
+      const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+      if (!res.ok) return;
+      const results = await res.json();
+
+      if (results && results.length > 0) {
+        const topResult = results[0];
+        const title = topResult.display_name.split(',')[0].trim();
+        setDestination(parseFloat(topResult.lat), parseFloat(topResult.lon), `${category}: ${title}`);
+      }
+    } catch (err) {
+      console.warn('Quick chip search error:', err.message);
     }
   };
 });
-
-document.getElementById('btn-start-replay').onclick = async () => {
-  gtLine.setLatLngs([]); naiveLine.setLatLngs([]); aiLine.setLatLngs([]);
-  const tripId = document.getElementById('trip-select').value;
-  const res = await fetch(`/api/replay/${tripId}/start`, { method: 'POST' });
-  const data = await res.json();
-  replaySessionId = data.session_id;
-  document.getElementById('btn-start-replay').disabled = true;
-  document.getElementById('btn-pause-replay').disabled = false;
-  document.getElementById('btn-pause-replay').textContent = 'Pause';
-  runReplayLoop();
-};
-
-document.getElementById('btn-pause-replay').onclick = () => {
-  if (replayTimer) {
-    clearInterval(replayTimer);
-    replayTimer = null;
-    document.getElementById('btn-pause-replay').textContent = 'Resume';
-  } else {
-    runReplayLoop();
-    document.getElementById('btn-pause-replay').textContent = 'Pause';
-  }
-};
-
-let replayTick = 0;
-
-function runReplayLoop() {
-  replayTimer = setInterval(async () => {
-    const simulateOutage = document.getElementById('toggle-outage-replay').checked;
-    const res = await fetch(`/api/replay/session/${replaySessionId}/next`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ simulate_outage: simulateOutage }),
-    });
-    const d = await res.json();
-    if (d.done) {
-      clearInterval(replayTimer); replayTimer = null;
-      document.getElementById('btn-start-replay').disabled = false;
-      document.getElementById('btn-pause-replay').disabled = true;
-      document.getElementById('replay-phase-text').textContent = 'Benchmark Complete';
-      return;
-    }
-
-    replayTick++;
-
-    if (d.phase === 'warmup') {
-      aiMarker.setLatLng([d.lat, d.lon]).addTo(map);
-      map.panTo([d.lat, d.lon]);
-      updateHUD({ mode: 'GNSS', speed_kmh: 68.0, heading_deg: 90, confidence: 95, motion_state: 'VEHICLE_DRIVING' });
-      document.getElementById('replay-phase-text').textContent = 'Phase: GNSS Warmup';
-      document.getElementById('replay-time-text').textContent = `${(replayTick * 0.1).toFixed(1)}s`;
-      document.getElementById('replay-progress-fill').style.width = '15%';
-      return;
-    }
-
-    gtMarker.setLatLng([d.ground_truth.lat, d.ground_truth.lon]).addTo(map);
-    gtLine.addLatLng([d.ground_truth.lat, d.ground_truth.lon]);
-
-    if (d.mode === 'DR') {
-      aiMarker.setLatLng([d.ai_fused.lat, d.ai_fused.lon]).addTo(map);
-      aiLine.addLatLng([d.ai_fused.lat, d.ai_fused.lon]);
-      naiveMarker.setLatLng([d.naive.lat, d.naive.lon]).addTo(map);
-      naiveLine.addLatLng([d.naive.lat, d.naive.lon]);
-
-      const safarDrift = haversineM(d.ground_truth.lat, d.ground_truth.lon, d.ai_fused.lat, d.ai_fused.lon);
-      const naiveDrift = haversineM(d.ground_truth.lat, d.ground_truth.lon, d.naive.lat, d.naive.lon);
-      const reduction = naiveDrift > 0.1 ? Math.round(((naiveDrift - safarDrift) / naiveDrift) * 100) : 0;
-
-      updateHUD({ mode: 'DR', speed_kmh: d.speed_kmh, heading_deg: 90, confidence: 92, motion_state: 'VEHICLE_DRIVING' });
-      map.panTo([d.ai_fused.lat, d.ai_fused.lon]);
-
-      // Benchmark Dashboard updates
-      document.getElementById('rep-safar-drift').textContent = `${safarDrift.toFixed(1)} m`;
-      document.getElementById('rep-naive-drift').textContent = `${naiveDrift.toFixed(1)} m`;
-      document.getElementById('rep-reduction').textContent = `${Math.max(0, reduction)}% Error Cut`;
-      document.getElementById('rep-distance').textContent = `${(replayTick * 1.8).toFixed(0)} m`;
-
-      document.getElementById('replay-phase-text').textContent = 'Phase: GNSS Outage (IDR Active)';
-      const elapsedSec = (replayTick * 0.1).toFixed(1);
-      document.getElementById('replay-time-text').textContent = `${elapsedSec}s / 60s`;
-      const pct = Math.min(100, Math.round((replayTick / 640) * 100));
-      document.getElementById('replay-progress-fill').style.width = `${pct}%`;
-    } else {
-      aiMarker.setLatLng([d.lat, d.lon]).addTo(map);
-      map.panTo([d.lat, d.lon]);
-      updateHUD({ mode: 'GNSS', speed_kmh: 70.0, heading_deg: 90, confidence: 95, motion_state: 'VEHICLE_DRIVING' });
-    }
-  }, replayIntervalMs);
-}

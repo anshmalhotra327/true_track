@@ -1,5 +1,5 @@
 """
-main.py — TrueTrack backend.
+main.py — S.A.F.A.R. backend.
 
 Endpoints:
   GET  /api/health
