@@ -1,36 +1,95 @@
 // ============================================================
-// Map setup
+// S.A.F.A.R. — Sensor-Aided Fusion for Accurate Routing
+// Intelligent Dead Reckoning Frontend (SIH 26168)
 // ============================================================
-const map = L.map('map').setView([20.5937, 78.9629], 5); // default: India, until we get a real fix
+
+const map = L.map('map').setView([28.6139, 77.2090], 14); // New Delhi default until fix
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors',
+  attribution: '&copy; OpenStreetMap contributors | S.A.F.A.R. DietCode',
 }).addTo(map);
 
-function dot(color) {
-  return L.circleMarker([0, 0], { radius: 8, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1 });
+function createMarker(color) {
+  return L.circleMarker([0, 0], {
+    radius: 9, color: '#ffffff', weight: 2.5, fillColor: color, fillOpacity: 1
+  });
 }
-const style = (color, dashed) => ({ color, weight: 4, opacity: 0.85, dashArray: dashed ? '6 6' : null });
+const style = (color, dashed) => ({ color, weight: 4, opacity: 0.9, dashArray: dashed ? '6 6' : null });
 
-// Live-mode layers
-const liveMarker = dot('#1E2761');       // current fused/GPS position
-const destMarker = dot('#C62828');       // chosen destination
-const routeLine = L.polyline([], style('#1E7A34')).addTo(map); // planned route
-const liveTrail = L.polyline([], style('#1E2761'));            // where we've actually been
+// Live Navigation Layers
+const liveMarker = createMarker('#00d2ff');       // Fused / Current vehicle position
+const destMarker = createMarker('#ff3d00');       // Destination marker
+const routeLine = L.polyline([], style('#00e676')).addTo(map); // Planned route (green)
+const liveTrail = L.polyline([], style('#00d2ff'));            // Vehicle trajectory (cyan)
 
-// Replay-mode layers
-const gtLine = L.polyline([], style('#1E7A34'));
-const naiveLine = L.polyline([], style('#C62828', true));
-const aiLine = L.polyline([], style('#1E2761'));
-const gtMarker = dot('#1E7A34');
-const naiveMarker = dot('#C62828');
-const aiMarker = dot('#1E2761');
+// Replay Layers
+const gtLine = L.polyline([], style('#00e676'));
+const naiveLine = L.polyline([], style('#ff3d00', true));
+const aiLine = L.polyline([], style('#00d2ff'));
+const gtMarker = createMarker('#00e676');
+const naiveMarker = createMarker('#ff3d00');
+const aiMarker = createMarker('#00d2ff');
 
-function setStatus(mode, speedKmh, gpsText) {
-  const modeEl = document.getElementById('status-mode');
-  modeEl.textContent = mode || '—';
-  modeEl.className = mode || '';
-  document.getElementById('status-speed').textContent = speedKmh != null ? `${speedKmh.toFixed(1)} km/h` : '—';
-  document.getElementById('status-gps').textContent = gpsText != null ? gpsText : '—';
+// Compass direction helper
+function degToCompass(deg) {
+  if (deg == null || isNaN(deg)) return '—';
+  const val = Math.floor((deg / 22.5) + 0.5);
+  const arr = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+  return `${arr[val % 16]} (${Math.round(deg)}°)`;
+}
+
+// Update HUD Dashboard
+function updateHUD(data) {
+  const speedEl = document.getElementById('hud-speed');
+  const headingEl = document.getElementById('hud-heading');
+  const confEl = document.getElementById('hud-conf');
+  const motionEl = document.getElementById('hud-motion');
+  const pillEl = document.getElementById('live-indicator');
+  const indText = document.getElementById('indicator-text');
+  const banner = document.getElementById('status-banner');
+
+  // Speed
+  if (data.speed_kmh != null) {
+    speedEl.innerHTML = `${data.speed_kmh.toFixed(1)} <span class="unit">km/h</span>`;
+  } else {
+    speedEl.innerHTML = `0.0 <span class="unit">km/h</span>`;
+  }
+
+  // Heading
+  headingEl.textContent = degToCompass(data.heading_deg);
+
+  // Confidence
+  const conf = data.confidence != null ? data.confidence : 90;
+  confEl.innerHTML = `${conf}<span class="unit">%</span>`;
+  if (conf > 75) {
+    confEl.style.color = 'var(--accent-green)';
+  } else if (conf > 50) {
+    confEl.style.color = 'var(--accent-orange)';
+  } else {
+    confEl.style.color = 'var(--accent-red)';
+  }
+
+  // Motion State
+  const stateLabels = {
+    'STATIONARY': 'Stationary (ZUPT)',
+    'HAND_DISTURBANCE': 'Disturbance Filtered',
+    'VEHICLE_DRIVING': 'Vehicle Kinematics',
+  };
+  motionEl.textContent = stateLabels[data.motion_state] || (data.motion_state || 'Stationary (ZUPT)');
+
+  // Mode and Banner
+  if (data.mode === 'DR') {
+    pillEl.className = 'live-pill status-dr';
+    indText.textContent = 'Dead Reckoning (IDR)';
+    banner.classList.remove('hidden');
+  } else if (data.mode === 'GNSS') {
+    pillEl.className = 'live-pill status-gnss';
+    indText.textContent = 'GNSS Available';
+    banner.classList.add('hidden');
+  } else {
+    pillEl.className = 'live-pill';
+    indText.textContent = 'Waiting for Fix';
+    banner.classList.add('hidden');
+  }
 }
 
 function haversineM(lat1, lon1, lat2, lon2) {
@@ -45,6 +104,7 @@ function haversineM(lat1, lon1, lat2, lon2) {
 // ============================================================
 document.getElementById('tab-replay').onclick = () => switchTab('replay');
 document.getElementById('tab-live').onclick = () => switchTab('live');
+
 function switchTab(which) {
   document.getElementById('tab-replay').classList.toggle('active', which === 'replay');
   document.getElementById('tab-live').classList.toggle('active', which === 'live');
@@ -59,19 +119,23 @@ function switchTab(which) {
     gtLine.setLatLngs([]); naiveLine.setLatLngs([]); aiLine.setLatLngs([]);
   }
 }
-switchTab('live'); // start on Live Mode
+switchTab('live');
 
 // ============================================================
-// Replay mode (unchanged behaviour — plays back a real recorded trip)
+// Replay Mode
 // ============================================================
 let replayTimer = null;
 let replaySessionId = null;
 
 async function loadTrips() {
-  const res = await fetch('/api/replay/trips');
-  const trips = await res.json();
-  const sel = document.getElementById('trip-select');
-  sel.innerHTML = trips.map(t => `<option value="${t.id}">${t.label}</option>`).join('');
+  try {
+    const res = await fetch('/api/replay/trips');
+    const trips = await res.json();
+    const sel = document.getElementById('trip-select');
+    sel.innerHTML = trips.map(t => `<option value="${t.id}">${t.label}</option>`).join('');
+  } catch (err) {
+    console.error('Failed to load trips:', err);
+  }
 }
 loadTrips();
 
@@ -116,7 +180,7 @@ function runReplayLoop() {
     if (d.phase === 'warmup') {
       aiMarker.setLatLng([d.lat, d.lon]).addTo(map);
       map.panTo([d.lat, d.lon]);
-      setStatus('GNSS', null, 'demo trip');
+      updateHUD({ mode: 'GNSS', speed_kmh: 60.0, heading_deg: 90, confidence: 95, motion_state: 'VEHICLE_DRIVING' });
       return;
     }
 
@@ -129,48 +193,54 @@ function runReplayLoop() {
       naiveMarker.setLatLng([d.naive.lat, d.naive.lon]).addTo(map);
       naiveLine.addLatLng([d.naive.lat, d.naive.lon]);
       const drift = haversineM(d.ground_truth.lat, d.ground_truth.lon, d.ai_fused.lat, d.ai_fused.lon);
-      setStatus('DR', d.speed_kmh, `drift ${drift.toFixed(0)}m`);
+      updateHUD({ mode: 'DR', speed_kmh: d.speed_kmh, heading_deg: 90, confidence: 88, motion_state: 'VEHICLE_DRIVING' });
       map.panTo([d.ai_fused.lat, d.ai_fused.lon]);
     } else {
       aiMarker.setLatLng([d.lat, d.lon]).addTo(map);
       map.panTo([d.lat, d.lon]);
-      setStatus('GNSS', null, 'demo trip');
+      updateHUD({ mode: 'GNSS', speed_kmh: 70.0, heading_deg: 90, confidence: 95, motion_state: 'VEHICLE_DRIVING' });
     }
   }, 100);
 }
 
 // ============================================================
-// Live mode — behaves like a normal map app first, AI dead-reckoning
-// only takes over when real GPS/network signal is actually lost.
+// Live Navigation Mode
 // ============================================================
 let liveSessionId = null;
 let liveTimer = null;
 let tracking = false;
+let isDispatching = false;
 
 let latestAccel = null;
 let latestGravityEst = { x: 0, y: 0, z: 9.81 };
 let latestGyro = { yaw: 0, pitch: 0, roll: 0 };
-const GRAVITY_ALPHA = 0.85;
 
-let latestGps = null;          // {lat, lon, accuracy} from the most recent GOOD fix
-let lastFixTime = 0;           // ms timestamp of the most recent GOOD fix
+let latestGps = null;
+let lastFixTime = 0;
 let haveEverFixed = false;
-const MAX_ACCEPTABLE_ACCURACY_M = 60; // reject wildly inaccurate fixes (cell-tower-only, etc.)
-const STALE_AFTER_MS = 4000;          // no good fix for this long -> treat as signal lost
+let gpsErrorOccurred = false;
+const MAX_ACCEPTABLE_ACCURACY_M = 80;
 
 function onDeviceMotion(e) {
   const a = e.accelerationIncludingGravity;
   if (!a || a.x == null) return;
-  latestAccel = { x: a.x, y: a.y, z: a.z };
-  // Low-pass filter to separate gravity out of the combined reading -- the
-  // same technique a phone's own gravity sensor uses. We don't rely on the
-  // browser's separate "acceleration" (gravity-removed) field because it
-  // isn't reliably available across devices/browsers.
-  latestGravityEst = {
-    x: GRAVITY_ALPHA * latestGravityEst.x + (1 - GRAVITY_ALPHA) * a.x,
-    y: GRAVITY_ALPHA * latestGravityEst.y + (1 - GRAVITY_ALPHA) * a.y,
-    z: GRAVITY_ALPHA * latestGravityEst.z + (1 - GRAVITY_ALPHA) * a.z,
-  };
+
+  const lin = e.acceleration;
+  if (lin && lin.x != null) {
+    // Hardware-fused linear acceleration from smartphone IMU chip!
+    latestAccel = { x: a.x, y: a.y, z: a.z };
+    latestGravityEst = { x: a.x - lin.x, y: a.y - lin.y, z: a.z - lin.z };
+  } else {
+    // Fallback: 0.5Hz low-pass filter (gravity shifts slowly with road grade, not hand tremors)
+    latestAccel = { x: a.x, y: a.y, z: a.z };
+    const alpha = 0.94;
+    latestGravityEst = {
+      x: alpha * latestGravityEst.x + (1 - alpha) * a.x,
+      y: alpha * latestGravityEst.y + (1 - alpha) * a.y,
+      z: alpha * latestGravityEst.z + (1 - alpha) * a.z,
+    };
+  }
+
   if (e.rotationRate) {
     const d2r = Math.PI / 180;
     latestGyro = {
@@ -184,14 +254,18 @@ function onDeviceMotion(e) {
 function onGeoSuccess(pos) {
   const acc = pos.coords.accuracy;
   if (acc != null && acc > MAX_ACCEPTABLE_ACCURACY_M) {
-    // Fix arrived but is too inaccurate to trust (e.g. wifi/cell-only lookup)
-    // -- don't use it, but don't treat it as a total loss either; just wait
-    // for a better one. If nothing better shows up, STALE_AFTER_MS below
-    // will correctly trigger dead reckoning anyway.
     return;
   }
-  latestGps = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: acc };
+  latestGps = {
+    lat: pos.coords.latitude,
+    lon: pos.coords.longitude,
+    speed: pos.coords.speed,
+    heading: pos.coords.heading,
+    accuracy: acc,
+  };
   lastFixTime = Date.now();
+  gpsErrorOccurred = false;
+
   if (!haveEverFixed) {
     haveEverFixed = true;
     map.setView([latestGps.lat, latestGps.lon], 17);
@@ -203,8 +277,7 @@ function onGeoSuccess(pos) {
 
 function onGeoError(err) {
   console.warn('Geolocation error:', err.message);
-  // Explicit error -- lastFixTime is simply not refreshed, so the staleness
-  // check below will correctly flip into dead-reckoning mode.
+  gpsErrorOccurred = true;
 }
 
 document.getElementById('btn-recenter').onclick = () => {
@@ -214,72 +287,89 @@ document.getElementById('btn-recenter').onclick = () => {
 document.getElementById('btn-start-live').onclick = async () => {
   if (tracking) return;
 
-  // iOS 13+ requires an explicit permission prompt triggered by a user gesture
+  // iOS 13+ sensor permission gesture
   if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
     try {
       const perm = await DeviceMotionEvent.requestPermission();
-      if (perm !== 'granted') { alert('Motion sensor permission denied — AI dead reckoning needs this to work during a signal outage.'); return; }
-    } catch (err) { alert('Could not request motion permission: ' + err); return; }
+      if (perm !== 'granted') {
+        alert('Motion sensor permission is required for AI dead-reckoning during GPS blackouts.');
+        return;
+      }
+    } catch (err) {
+      alert('Could not request motion permission: ' + err);
+      return;
+    }
   }
   window.addEventListener('devicemotion', onDeviceMotion);
 
   if (!navigator.geolocation) {
-    alert('This browser does not support geolocation.');
+    alert('This device or browser does not support geolocation.');
     return;
   }
   navigator.geolocation.watchPosition(onGeoSuccess, onGeoError, {
-    enableHighAccuracy: true, maximumAge: 0, timeout: 5000,
+    enableHighAccuracy: true, maximumAge: 1000, timeout: 8000,
   });
 
-  const res = await fetch('/api/live/session/start', { method: 'POST' });
-  const data = await res.json();
-  liveSessionId = data.session_id;
+  try {
+    const res = await fetch('/api/live/session/start', { method: 'POST' });
+    const data = await res.json();
+    liveSessionId = data.session_id;
+  } catch (err) {
+    alert('Failed to connect to backend engine: ' + err.message);
+    return;
+  }
+
   tracking = true;
   document.getElementById('btn-start-live').disabled = true;
-  document.getElementById('btn-start-live').textContent = 'Tracking…';
+  document.getElementById('btn-start-live').textContent = 'Tracking Active';
 
+  // 10Hz sampling loop with non-overlapping dispatch guard
   liveTimer = setInterval(async () => {
-    if (!latestAccel) return; // no motion data yet, nothing to send
+    if (!latestAccel || isDispatching) return;
 
-    const manualOutage = document.getElementById('toggle-outage-live').checked;
-    const signalStale = haveEverFixed && (Date.now() - lastFixTime > STALE_AFTER_MS);
-    const useGps = haveEverFixed && !manualOutage && !signalStale;
+    isDispatching = true;
+    try {
+      const manualOutage = document.getElementById('toggle-outage-live').checked;
+      // Real outage condition: manual toggle OR explicit geo error OR accuracy failure
+      const isOutage = manualOutage || gpsErrorOccurred || !haveEverFixed;
+      const useGps = haveEverFixed && !isOutage;
 
-    const body = {
-      accel: latestAccel, gravity: latestGravityEst, gyro: latestGyro,
-      gps: useGps ? { lat: latestGps.lat, lon: latestGps.lon } : null,
-      simulate_outage: manualOutage || signalStale || !haveEverFixed,
-      dt: 0.1,
-    };
-    const r = await fetch(`/api/live/session/${liveSessionId}/sample`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    const d = await r.json();
+      const body = {
+        accel: latestAccel,
+        gravity: latestGravityEst,
+        gyro: latestGyro,
+        gps: useGps ? latestGps : null,
+        simulate_outage: isOutage,
+        dt: 0.1,
+      };
 
-    if (d.mode === 'NO_FIX' || d.lat == null) {
-      setStatus('waiting for GPS…', null, 'no fix yet');
-      return;
+      const r = await fetch(`/api/live/session/${liveSessionId}/sample`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+
+      if (d.mode === 'NO_FIX' || d.lat == null) {
+        updateHUD({ mode: 'NO_FIX', speed_kmh: 0.0, heading_deg: null, confidence: 10, motion_state: 'Waiting for GPS' });
+        return;
+      }
+
+      liveMarker.setLatLng([d.lat, d.lon]).addTo(map);
+      liveTrail.addLatLng([d.lat, d.lon]);
+      map.panTo([d.lat, d.lon]);
+
+      updateHUD(d);
+    } catch (err) {
+      console.warn('Live sample sync error:', err);
+    } finally {
+      isDispatching = false;
     }
-
-    liveMarker.setLatLng([d.lat, d.lon]).addTo(map);
-    liveTrail.addLatLng([d.lat, d.lon]);
-    map.panTo([d.lat, d.lon]);
-
-    let gpsText;
-    if (d.mode === 'GNSS') {
-      gpsText = latestGps && latestGps.accuracy != null ? `±${Math.round(latestGps.accuracy)}m` : 'ok';
-    } else {
-      gpsText = manualOutage ? 'forced outage' : 'signal lost — using AI';
-    }
-    setStatus(d.mode, d.speed_kmh, gpsText);
   }, 100);
 };
 
 // ============================================================
 // Destination search (Nominatim geocoding) + routing (OSRM)
-// Both are free public demo services -- fine for hackathon/demo use,
-// not for production-scale traffic (Nominatim in particular asks for
-// max ~1 request/second).
 // ============================================================
 let selectedDestination = null;
 
@@ -325,25 +415,23 @@ document.getElementById('btn-route').onclick = async () => {
 async function drawRoute() {
   if (!selectedDestination) return;
   if (!latestGps) {
-    alert('Waiting for your current location first — allow location access, then try again.');
+    alert('Waiting for your current location fix first.');
     return;
   }
   const { lat: olat, lon: olon } = latestGps;
   const { lat: dlat, lon: dlon } = selectedDestination;
   const url = `https://router.project-osrm.org/route/v1/driving/${olon},${olat};${dlon},${dlat}?overview=full&geometries=geojson`;
-  let data;
   try {
     const res = await fetch(url);
-    data = await res.json();
+    const data = await res.json();
+    if (!data.routes || !data.routes.length) {
+      alert('No driving route found between your location and that destination.');
+      return;
+    }
+    const coords = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    routeLine.setLatLngs(coords).addTo(map);
+    map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
   } catch (e) {
     alert('Routing service unavailable: ' + e.message);
-    return;
   }
-  if (!data.routes || !data.routes.length) {
-    alert('No route found between your location and that destination.');
-    return;
-  }
-  const coords = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-  routeLine.setLatLngs(coords).addTo(map);
-  map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
 }

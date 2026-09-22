@@ -29,11 +29,14 @@ GPS_LAT_COL = "Latitude (degrees)"
 GPS_LON_COL = "Longitude (degrees)"
 
 
-def _find_col(columns, prefix: str) -> str:
-    for c in columns:
-        if c.startswith(prefix):
-            return c
-    raise KeyError(f"No column starting with {prefix!r} found in {list(columns)}")
+def _find_col(columns, prefixes) -> str:
+    if isinstance(prefixes, str):
+        prefixes = [prefixes]
+    for p in prefixes:
+        for c in columns:
+            if c.upper().startswith(p.upper()):
+                return c
+    raise KeyError(f"None of prefixes {prefixes!r} found in {list(columns)}")
 
 
 def load_trip(s_path: str, v_path: str) -> pd.DataFrame:
@@ -46,21 +49,32 @@ def load_trip(s_path: str, v_path: str) -> pd.DataFrame:
     n = min(len(s), len(v))
     s, v = s.iloc[:n].reset_index(drop=True), v.iloc[:n].reset_index(drop=True)
 
-    out_names = [
-        "accel_x", "accel_y", "accel_z",
-        "gravity_x", "gravity_y", "gravity_z",
-        "gyro_yaw", "gyro_pitch", "gyro_roll",
-        "orient_yaw", "orient_pitch", "orient_roll",
+    col_mapping = [
+        ("accel_x", ["ACCELEROMETER X"]),
+        ("accel_y", ["ACCELEROMETER Y"]),
+        ("accel_z", ["ACCELEROMETER Z"]),
+        ("gravity_x", ["GRAVITY X"]),
+        ("gravity_y", ["GRAVITY Y"]),
+        ("gravity_z", ["GRAVITY Z"]),
+        ("gyro_yaw", ["GYROSCOPE Yaw", "GYROSCOPE Z"]),
+        ("gyro_pitch", ["GYROSCOPE Pitch", "GYROSCOPE X"]),
+        ("gyro_roll", ["GYROSCOPE Roll", "GYROSCOPE Y"]),
+        ("orient_yaw", ["ORIENTATION (Yaw)", "ORIENTATION (Azimuth)", "ORIENTATION Yaw"]),
+        ("orient_pitch", ["ORIENTATION (Pitch)", "ORIENTATION Pitch"]),
+        ("orient_roll", ["ORIENTATION (Roll", "ORIENTATION Roll"]),
     ]
-    prefixes = ACCEL_PREFIXES + GRAV_PREFIXES + GYRO_PREFIXES + ORIENT_PREFIXES
 
     df = pd.DataFrame()
-    for out_name, prefix in zip(out_names, prefixes):
-        df[out_name] = s[_find_col(s.columns, prefix)]
+    for out_name, cands in col_mapping:
+        df[out_name] = s[_find_col(s.columns, cands)]
 
-    df["speed_kmh"] = v[SPEED_LABEL_COL]
-    df["lat"] = v[GPS_LAT_COL]
-    df["lon"] = v[GPS_LON_COL]
+    speed_col = _find_col(v.columns, ["Indicated Vehicle Speed", "Vehicle Speed", "SPEED"])
+    lat_col = _find_col(v.columns, ["Latitude (degrees)", "GPS LATITUDE", "LATITUDE"])
+    lon_col = _find_col(v.columns, ["Longitude (degrees)", "GPS LONGITUDE", "LONGITUDE"])
+
+    df["speed_kmh"] = v[speed_col]
+    df["lat"] = v[lat_col]
+    df["lon"] = v[lon_col]
     df["dt"] = 0.1  # confirmed 10Hz in both files
     df["t"] = df["dt"].cumsum()
     return df

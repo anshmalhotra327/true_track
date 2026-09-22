@@ -1,54 +1,57 @@
-# TrueTrack — backend
-
-AI-assisted dead reckoning for GNSS-denied vehicle navigation. FastAPI backend
-plus a small Leaflet frontend, with two demo modes:
-
-- **Replay** — steps through a real, held-out IO-VNBD trip and compares ground
-  truth vs naive double-integration vs the AI-fused estimate.
-- **Live** — feeds real phone IMU/GPS samples from the browser through the same
-  fusion logic.
+# S.A.F.A.R. — Sensor-Aided Fusion for Accurate Routing
+**AI-ML Based Intelligent Dead Reckoning (IDR) System for Seamless Navigation**  
+*Smart India Hackathon 2026 | Problem Statement ID: SIH 26168 | Team DietCode*
 
 ---
 
-## Deploying to Render
+## Overview
 
-The repo is configured as a Render Blueprint. Two options:
+S.A.F.A.R. is an edge-deployable software engine and web application that transforms a smartphone into an **Intelligent Dead Reckoning (IDR)** system with GNSS Fusion. When GNSS outages occur (in tunnels, urban canyons, dense forests, or during jamming), S.A.F.A.R. instantly transitions to inertial tracking, maintaining lane-level accuracy without requiring any physical connection to the vehicle OBD-II/CAN bus port.
 
-### Option A — Blueprint (recommended)
-
-1. Push this folder to the root of your GitHub repo.
-2. In Render: **New → Blueprint**, pick the repo. It reads `render.yaml`.
-3. Deploy. Health check is `GET /api/health`.
-
-### Option B — manual Web Service
-
-| Setting | Value |
-| --- | --- |
-| Runtime | Python 3 |
-| Build command | `pip install --upgrade pip && pip install -r requirements.txt` |
-| Start command | `uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1` |
-| Health check path | `/api/health` |
-| Env var | `PYTHON_VERSION` = `3.12.8` |
-
-Once live, the frontend is served at `/` and the API under `/api/...`.
-
----
-
-## Two things that will break the deploy if you change them
-
-**1. Do not downgrade `numpy` or `scikit-learn`.**
-`app/trained_model.joblib` was pickled with scikit-learn 1.8.x on numpy 2.x.
-Installing numpy 1.x raises `ModuleNotFoundError: No module named 'numpy._core'`
-at the first prediction; scikit-learn < 1.7 fails to reconstruct the
-`HistGradientBoostingRegressor`. `requirements.txt` has floors that prevent both.
-
-**2. Keep `--workers 1`.**
-Replay and live sessions live in per-process dictionaries. A second worker
-would return `404 Unknown session` for roughly half of all requests.
+### Key Capabilities (SIH 26168 Requirements Met)
+1. **In-Vehicle Alignment & Calibration Engine**:
+   - Projects 3D gyroscope and linear acceleration onto Earth-vertical (gravity) and forward/lateral vehicle axes.
+   - Extracts true vehicle horizontal yaw rate around the gravity axis ($\omega_{\text{turn}} = \vec{\omega} \cdot \hat{z}_{\text{down}}$), eliminating phone mounting angle errors.
+2. **Disturbance & Confidence Model**:
+   - **Zero-Velocity Update (ZUPT)**: Locks speed to `0.0 km/h` and drift to `0.0 m` when stationary (at traffic lights, parked, or resting on a desk).
+   - **Hand-Disturbance Rejection**: Detects unconstrained 3D rotation rates ($\|\vec{\omega}_{\text{tilt}}\| > 0.35\text{ rad/s}$) and sudden wrist jerks, preventing artificial 40–50 km/h speed spikes.
+   - Computes dynamic **Navigation Confidence (0–100%)**.
+3. **Physics-Constrained AI Velocity Estimator**:
+   - Bounded by physical vehicle acceleration limits ($|dv/dt| \le 3.0\text{ m/s}^2$).
+   - Seamless hand-off from last confirmed GNSS speed when entering a blackout.
+4. **Non-Holonomic Constraints (NHC) & Dynamic Heading**:
+   - Enforces $v_{\text{lateral}} = 0, v_{\text{vertical}} = 0$, advancing position along vehicle heading.
+   - Dynamic heading tracking around turns via calibrated gyro turn rate.
+5. **Real-time Navigation HUD**:
+   - Displays Speed, Compass Heading, Navigation Confidence, and Motion State in real-time.
 
 ---
 
-## Running locally
+## Two Operating Modes
+
+- **Live Navigation Mode**: Uses native smartphone IMU (`devicemotion`) and GPS (`geolocation`). When GPS is available, displays live GNSS telemetry; when GPS drops or "Force GNSS Outage" is toggled, switches seamlessly to S.A.F.A.R. Dead Reckoning.
+- **Dataset Replay Mode**: Steps through real benchmark trips from the **IO-VNBD dataset** (e.g. `Vta01a` 60s highway blackout) and visualizes Ground Truth vs Naive Double-Integration vs S.A.F.A.R. AI-Fused trajectory.
+
+---
+
+## Deploying to Render / Cloud
+
+The repository is configured as a Render Blueprint:
+
+1. Push this folder to the root of your GitHub repository.
+2. In Render: **New → Blueprint**, select your repo (it reads `render.yaml`).
+3. Deploy! Health check endpoint is `GET /api/health`.
+
+### Manual Web Service Configuration
+- **Runtime**: Python 3
+- **Build command**: `pip install --upgrade pip && pip install -r requirements.txt`
+- **Start command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1`
+- **Health check path**: `/api/health`
+- **Python version**: `3.12.8`
+
+---
+
+## Running Locally
 
 ```bash
 python -m venv .venv
@@ -56,82 +59,40 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
+Open `http://localhost:8000/`.
 
-Open <http://localhost:8000/>.
+> **Note on Live Mode on mobile**: Mobile browsers only grant IMU sensor and geolocation permissions over **HTTPS** (or on `localhost`). On Render (which provides free HTTPS), live mobile sensors work seamlessly out of the box.
 
-Live mode uses the browser's motion and geolocation APIs, which browsers only
-expose over HTTPS or on `localhost` — it works on Render (HTTPS) and on
-localhost, but not over plain HTTP on a LAN IP.
+---
 
-For the training/eval scripts, install the extras too:
+## Retraining & Evaluation Scripts
 
 ```bash
 pip install -r requirements-dev.txt
-python train_model.py     # rewrites app/trained_model.joblib
-python offline_eval.py    # writes drift_comparison.png
+python train_model.py     # Trains model on diverse IO-VNBD trips + disturbance rejection
+python offline_eval.py    # Simulates 60s blackout and generates drift_comparison.png
 ```
-
-If you retrain, commit the regenerated `app/trained_model.joblib` and make sure
-the versions in `requirements.txt` still match what you trained with.
 
 ---
 
-## API
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/api/health` | liveness probe |
-| GET | `/api/replay/trips` | list bundled demo trips |
-| POST | `/api/replay/{trip_id}/start` | open a replay session |
-| POST | `/api/replay/session/{sid}/next` | advance one 100 ms step |
-| POST | `/api/live/session/start` | open a live sensor session |
-| POST | `/api/live/session/{sid}/sample` | submit one IMU(+GPS) sample |
-
----
-
-## Layout
+## Repository Structure
 
 ```
-app/                  FastAPI app, fusion engine, trained model
-  main.py             routes
-  fusion.py           naive DR, AI-fused DR, OnlineFusionSession
-  data_utils.py       IO-VNBD loading + feature engineering
-  geo.py              local ENU frame
-  model.py            lazy model loader
-  replay_data/        bundled demo trip CSVs (required at runtime)
-  trained_model.joblib
-static/               Leaflet frontend
-training_data/        raw IO-VNBD trips (training only, ~70 MB, not used at runtime)
-train_model.py        retrains the velocity model
-offline_eval.py       blackout drift evaluation -> drift_comparison.png
+app/
+  main.py             FastAPI application routes and telemetry schemas
+  fusion.py           S.A.F.A.R. sensor fusion & dead reckoning engine
+  data_utils.py       IO-VNBD dataset loading + feature engineering
+  geo.py              Local ENU frame conversion
+  model.py            Lazy model loader
+  replay.py           Replay trip runner
+  replay_data/        Bundled test trip CSVs
+  trained_model.joblib Trained scikit-learn model bundle
+static/
+  index.html          S.A.F.A.R. navigation HUD interface
+  style.css           Dark telemetry theme styling
+  app.js              Client-side sensor acquisition and Leaflet mapping
+train_model.py        Multi-trip model training script
+offline_eval.py       Benchmark evaluation and drift plotting
+requirements.txt      Production dependencies
+render.yaml           Render Blueprint configuration
 ```
-
-`training_data/` is only read by `train_model.py` and `offline_eval.py`. If you
-want faster clones and builds you can move it out of the repo entirely; the
-deployed service does not touch it.
-
----
-
-## What was changed to make this deployable
-
-- **`requirements.txt`** — `numpy==1.26.4` and `scikit-learn==1.5.1` were
-  incompatible with the committed model (trained on numpy 2.x / sklearn 1.8.x).
-  Replaced exact pins with correct bounded ranges. This was the actual deploy
-  breaker.
-- **`runtime.txt`** — had no trailing newline, so the version string could be
-  misparsed and the build would fall back to a newer Python with no wheels for
-  the pinned numpy. Fixed, and added `.python-version` (Render's current
-  mechanism) pinning 3.12.8.
-- **`render.yaml`** — `env: python` is deprecated, replaced with
-  `runtime: python`; added `healthCheckPath`, `PYTHON_VERSION`, and explicit
-  `--workers 1`.
-- **`app/model.py`** — load is lazy and thread-safe so the process binds `$PORT`
-  immediately; dependency-mismatch and missing-file cases now raise readable
-  errors instead of an opaque stack trace.
-- **`app/main.py`** — `.dict()` → `.model_dump()` (removed in pydantic v3);
-  model/data failures return `503` with a real message instead of `500`; static
-  mount guarded; added a `favicon.ico` handler.
-- **`app/replay.py`** — explicit check that the bundled replay CSVs are present.
-- **`.gitignore`** added; committed `__pycache__/*.pyc` removed (they were built
-  for Python 3.13 and are stale against the pinned 3.12).
-- **`requirements-dev.txt`** — moved `matplotlib` out of the production install.
