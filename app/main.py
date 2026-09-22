@@ -46,16 +46,19 @@ _replay_sessions = {}
 
 
 @app.get("/api/health")
+@app.get("/health")
 def health():
     return {"status": "ok"}
 
 
 @app.get("/api/replay/trips")
+@app.get("/replay/trips")
 def list_trips():
     return [{"id": tid, "label": cfg["label"]} for tid, cfg in TRIPS.items()]
 
 
 @app.post("/api/replay/{trip_id}/start")
+@app.post("/replay/{trip_id}/start")
 def start_replay(trip_id: str):
     try:
         trip = get_trip(trip_id)
@@ -81,6 +84,7 @@ class ReplayStepRequest(BaseModel):
 
 
 @app.post("/api/replay/session/{sid}/next")
+@app.post("/replay/session/{sid}/next")
 def replay_next(sid: str, req: ReplayStepRequest):
     sess = _replay_sessions.get(sid)
     if sess is None:
@@ -127,6 +131,7 @@ _live_sessions = {}
 
 
 @app.post("/api/live/session/start")
+@app.post("/live/session/start")
 def start_live_session():
     try:
         bundle = get_model_bundle()
@@ -167,6 +172,7 @@ class LiveSample(BaseModel):
 
 
 @app.post("/api/live/session/{sid}/sample")
+@app.post("/live/session/{sid}/sample")
 def live_sample(sid: str, sample: LiveSample):
     sess = _live_sessions.get(sid)
     if sess is None:
