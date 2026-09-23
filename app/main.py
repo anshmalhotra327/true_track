@@ -158,6 +158,7 @@ class GpsFix(BaseModel):
     lat: float
     lon: float
     speed: Optional[float] = None
+    speed_kmh: Optional[float] = None
     heading: Optional[float] = None
     accuracy: Optional[float] = None
 
@@ -184,6 +185,7 @@ def live_sample(sid: str, sample: LiveSample):
             "lat": sample.gps.lat,
             "lon": sample.gps.lon,
             "speed": sample.gps.speed,
+            "speed_kmh": sample.gps.speed_kmh,
             "heading": sample.gps.heading,
             "accuracy": sample.gps.accuracy,
         }

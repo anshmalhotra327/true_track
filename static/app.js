@@ -213,21 +213,29 @@ function handleDeviceMotion(e) {
   if (!a || a.x == null) return;
 
   const lin = e.acceleration;
+  let linX = 0, linY = 0, linZ = 0;
+
   if (lin && lin.x != null) {
+    linX = lin.x || 0;
+    linY = lin.y || 0;
+    linZ = lin.z || 0;
     latestAccel = { x: a.x || 0, y: a.y || 0, z: a.z || 0 };
     latestGravityEst = {
-      x: (a.x || 0) - (lin.x || 0),
-      y: (a.y || 0) - (lin.y || 0),
-      z: (a.z || 0) - (lin.z || 0),
+      x: (a.x || 0) - linX,
+      y: (a.y || 0) - linY,
+      z: (a.z || 0) - linZ,
     };
   } else {
     latestAccel = { x: a.x || 0, y: a.y || 0, z: a.z || 0 };
-    const alpha = 0.94;
+    const alpha = 0.92;
     latestGravityEst = {
       x: alpha * latestGravityEst.x + (1 - alpha) * (a.x || 0),
       y: alpha * latestGravityEst.y + (1 - alpha) * (a.y || 0),
       z: alpha * latestGravityEst.z + (1 - alpha) * (a.z || 0),
     };
+    linX = (a.x || 0) - latestGravityEst.x;
+    linY = (a.y || 0) - latestGravityEst.y;
+    linZ = (a.z || 0) - latestGravityEst.z;
   }
 
   if (e.rotationRate) {
@@ -239,17 +247,27 @@ function handleDeviceMotion(e) {
     };
   }
 
-  // Update sensor cards in drawer
-  const accelMag = Math.sqrt(latestAccel.x ** 2 + latestAccel.y ** 2 + latestAccel.z ** 2);
+  // Calculate Motion Acceleration (Linear acceleration magnitude without gravity)
+  const linMag = Math.sqrt(linX * linX + linY * linY + linZ * linZ);
+  const gravMag = Math.sqrt(latestGravityEst.x ** 2 + latestGravityEst.y ** 2 + latestGravityEst.z ** 2);
   const gyroMag = Math.sqrt(latestGyro.yaw ** 2 + latestGyro.pitch ** 2 + latestGyro.roll ** 2);
+
+  // Sensor noise floor is ~0.15 - 0.22 m/s^2. When idle in hand, cleanly display 0.0 m/s^2.
+  const displayMotionAccel = linMag < 0.22 ? 0.0 : linMag;
+
   const accelEl = document.getElementById('sensor-accel-val');
+  const gravEl = document.getElementById('sensor-gravity-val');
   const gyroEl = document.getElementById('sensor-gyro-val');
-  if (accelEl) accelEl.textContent = `${accelMag.toFixed(1)} m/s²`;
+  const turnRateEl = document.getElementById('drawer-turn-rate');
+
+  if (accelEl) accelEl.textContent = `${displayMotionAccel.toFixed(1)} m/s²`;
+  if (gravEl) gravEl.textContent = `${gravMag.toFixed(1)} m/s²`;
   if (gyroEl) gyroEl.textContent = `${gyroMag.toFixed(2)} rad/s`;
 
-  const turnRateDeg = (latestGyro.yaw * 180 / Math.PI);
-  const turnRateEl = document.getElementById('drawer-turn-rate');
-  if (turnRateEl) turnRateEl.textContent = `${Math.abs(turnRateDeg).toFixed(1)}°/s`;
+  if (turnRateEl) {
+    const turnRateDeg = (latestGyro.yaw * 180 / Math.PI);
+    turnRateEl.textContent = `${Math.abs(turnRateDeg).toFixed(1)}°/s`;
+  }
 }
 window.addEventListener('devicemotion', handleDeviceMotion, true);
 
@@ -259,7 +277,16 @@ window.addEventListener('devicemotion', handleDeviceMotion, true);
 let latestGps = null;
 let hasGpsFix = false;
 let userHasPanned = false;
+let lastGeoPoint = null;
+let currentFusedSpeedKmh = 0.0;
 const MAX_ACCEPTABLE_ACCURACY_M = 100;
+
+function haversineM(lat1, lon1, lat2, lon2) {
+  const R = 6371000, toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad, dLon = (lon2 - lon1) * toRad;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
 
 function onGeoSuccess(pos) {
   const acc = pos.coords.accuracy;
@@ -267,10 +294,45 @@ function onGeoSuccess(pos) {
 
   const lat = pos.coords.latitude;
   const lon = pos.coords.longitude;
-  const speed = pos.coords.speed;
+  const rawSpeed = pos.coords.speed;
   const heading = pos.coords.heading;
+  const now = pos.timestamp || Date.now();
 
-  latestGps = { lat, lon, speed, heading, accuracy: acc };
+  let fixSpeedKmh = null;
+  if (rawSpeed !== null && !isNaN(rawSpeed) && rawSpeed >= 0) {
+    fixSpeedKmh = rawSpeed * 3.6;
+  } else if (lastGeoPoint) {
+    const dtSec = (now - lastGeoPoint.time) / 1000.0;
+    if (dtSec >= 0.4 && dtSec <= 8.0) {
+      const distM = haversineM(lastGeoPoint.lat, lastGeoPoint.lon, lat, lon);
+      // Filter stationary GPS jitter: only accept speed if distance moved exceeds GPS accuracy deadband
+      const jitterDeadband = Math.max(1.8, Math.min(6.0, (acc || 8) * 0.35));
+      if (distM > jitterDeadband) {
+        fixSpeedKmh = (distM / dtSec) * 3.6;
+      } else {
+        fixSpeedKmh = 0.0;
+      }
+    }
+  }
+
+  lastGeoPoint = { lat, lon, time: now };
+
+  if (fixSpeedKmh !== null) {
+    fixSpeedKmh = Math.min(160.0, Math.max(0.0, fixSpeedKmh));
+    if (fixSpeedKmh < 1.0) fixSpeedKmh = 0.0;
+    currentFusedSpeedKmh = currentFusedSpeedKmh === 0.0
+      ? fixSpeedKmh
+      : (currentFusedSpeedKmh * 0.35 + fixSpeedKmh * 0.65);
+  }
+
+  latestGps = {
+    lat,
+    lon,
+    speed: rawSpeed,
+    speed_kmh: currentFusedSpeedKmh,
+    heading,
+    accuracy: acc,
+  };
 
   if (!hasGpsFix) {
     hasGpsFix = true;
@@ -279,8 +341,17 @@ function onGeoSuccess(pos) {
     liveTrail.setLatLngs([[lat, lon]]);
   }
 
-  if (latestCompassHeading == null && heading != null && !isNaN(heading) && (speed || 0) > 1.0) {
+  if (latestCompassHeading == null && heading != null && !isNaN(heading) && (currentFusedSpeedKmh || 0) > 1.0) {
     updateHeadingUI(heading);
+  }
+
+  // Immediate UI responsiveness: update speed display right away!
+  if (!isSimulatedOutage && hasGpsFix) {
+    const spdStr = currentFusedSpeedKmh.toFixed(1);
+    const speedEl = document.getElementById('hud-speed');
+    const drawerSpeedEl = document.getElementById('drawer-speed');
+    if (speedEl) speedEl.textContent = spdStr;
+    if (drawerSpeedEl) drawerSpeedEl.textContent = spdStr;
   }
 }
 
@@ -361,10 +432,16 @@ function updateHUD(data) {
   const confBar = document.getElementById('hud-conf-bar');
   const motionEl = document.getElementById('hud-motion');
 
-  // Digital Speed
-  const spd = (data.speed_kmh != null) ? data.speed_kmh.toFixed(1) : '0.0';
-  if (speedEl) speedEl.textContent = spd;
-  if (drawerSpeedEl) drawerSpeedEl.textContent = spd;
+  // Digital Speed: Prefer verified frontend GPS speed when GNSS is active and moving; otherwise use backend fused speed
+  let displaySpeed = '0.0';
+  if (!isSimulatedOutage && hasGpsFix && currentFusedSpeedKmh > 0) {
+    displaySpeed = currentFusedSpeedKmh.toFixed(1);
+  } else if (data.speed_kmh != null) {
+    displaySpeed = data.speed_kmh.toFixed(1);
+  }
+
+  if (speedEl) speedEl.textContent = displaySpeed;
+  if (drawerSpeedEl) drawerSpeedEl.textContent = displaySpeed;
 
   // Heading fallback if no compass
   if (latestCompassHeading == null && data.heading_deg != null) {

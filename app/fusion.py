@@ -23,6 +23,7 @@ Key Modules:
 5. Naive Dead Reckoning Baseline:
    - Double-integration baseline kept for benchmark comparison.
 """
+import time
 import math
 import numpy as np
 
@@ -195,6 +196,9 @@ class OnlineFusionSession:
         self.dr_heading = 0.0
         self.speed_kmh = 0.0
         self.last_gps_speed_kmh = 0.0
+        self.last_gps_raw = None
+        self.last_gps_fix_time = 0.0
+        self.last_gps_fix_xy = None
         self.turn_bias = 0.0
         self.warmup_turn_rates = []
         self.disturbance_cooldown = 0
@@ -272,29 +276,36 @@ class OnlineFusionSession:
             g_delta = 0.0
 
         # Classification logic:
-        # 1. ZUPT (Stationary): very low linear variance and low rotation, when stopped
-        if lin_std < 0.22 and lin_mag.mean() < 0.45 and gyro_mag < 0.10 and tilt_rate_mag < 0.10:
-            if self.speed_kmh < 3.0:
+        # 1. ZUPT (Stationary): very low linear variance and low rotation
+        if lin_std < 0.25 and lin_mag.mean() < 0.45 and gyro_mag < 0.20:
+            if self.speed_kmh < 2.5:
+                self.speed_kmh = 0.0
                 return "STATIONARY", 98, turn_rate, tilt_rate_mag
             else:
-                # Smooth road cruising at steady speed
-                return "VEHICLE_DRIVING", 92, turn_rate, tilt_rate_mag
+                # Cruising smoothly on a road/highway
+                return "VEHICLE_DRIVING", 94, turn_rate, tilt_rate_mag
 
-        # 2. Hand Disturbance / Phone Handling:
-        # Rapid tilt rate (> 0.35 rad/s) or unstable gravity direction (> 0.7 m/s^2 shift in 0.5s)
-        if tilt_rate_mag > 0.35 or g_delta > 0.7 or (gyro_mag > 0.7 and lin_std > 1.8):
-            conf = max(25, int(90 - tilt_rate_mag * 25 - g_delta * 12))
-            self.disturbance_cooldown = 15  # 1.5s cooldown after disturbance
-            return "HAND_DISTURBANCE", conf, turn_rate, tilt_rate_mag
+        # 2. Hand Disturbance / In-Hand Gestures:
+        # If vehicle is stopped or moving very slowly (< 3.5 km/h) and user is violently shaking/flipping the phone
+        if self.speed_kmh < 3.5:
+            if gyro_mag > 1.2 or tilt_rate_mag > 1.0 or g_delta > 2.2:
+                conf = max(25, int(90 - tilt_rate_mag * 20 - g_delta * 10))
+                self.disturbance_cooldown = 10  # 1.0s cooldown
+                return "HAND_DISTURBANCE", conf, turn_rate, tilt_rate_mag
+        else:
+            # Vehicle is in motion (bike/car): bumps and turns are NORMAL driving kinematics!
+            # Only extreme tumble (phone dropped/spun) triggers disturbance
+            if gyro_mag > 3.0 or g_delta > 4.5:
+                self.disturbance_cooldown = 10
+                return "HAND_DISTURBANCE", 40, turn_rate, tilt_rate_mag
 
-        # Post-disturbance cooldown: prevent residual hand jitter from triggering driving speeds
         if self.disturbance_cooldown > 0:
             self.disturbance_cooldown -= 1
-            state = "STATIONARY" if self.speed_kmh < 1.0 else "HAND_DISTURBANCE"
-            return state, 75, turn_rate, tilt_rate_mag
+            if self.speed_kmh < 1.0:
+                return "STATIONARY", 80, turn_rate, tilt_rate_mag
 
         # 3. Vehicle driving
-        conf = min(95, max(75, int(95 - lin_std * 4)))
+        conf = min(96, max(75, int(96 - lin_std * 3)))
         return "VEHICLE_DRIVING", conf, turn_rate, tilt_rate_mag
 
     def _current_features(self):
@@ -315,7 +326,7 @@ class OnlineFusionSession:
         Processes one sample (10Hz).
         accel, gravity: {"x","y","z"} in m/s^2
         gyro: {"yaw","pitch","roll"} in rad/s
-        gps: {"lat", "lon", optional "speed", optional "heading"} or None
+        gps: {"lat", "lon", optional "speed", optional "speed_kmh", optional "heading"} or None
         simulate_outage: bool
         dt: timestep (default 0.1s)
         """
@@ -333,33 +344,64 @@ class OnlineFusionSession:
             if self.ref_frame is None:
                 self.ref_frame = LocalFrame(gps["lat"], gps["lon"])
             x, y = self.ref_frame.to_xy(gps["lat"], gps["lon"])
-            self.gps_track.append((x, y))
-            if len(self.gps_track) > self.LONG_WINDOW:
-                self.gps_track.pop(0)
 
-            # Determine GPS speed
-            gps_speed_kmh = None
-            if gps.get("speed") is not None:
-                # Browser coords.speed is in m/s
-                gps_speed_kmh = float(gps["speed"]) * 3.6
-            elif gps.get("speed_kmh") is not None:
-                gps_speed_kmh = float(gps["speed_kmh"])
-            elif len(self.gps_track) >= 2:
-                # Derived from successive GPS fixes
-                dx = self.gps_track[-1][0] - self.gps_track[-2][0]
-                dy = self.gps_track[-1][1] - self.gps_track[-2][1]
-                dist_step = math.hypot(dx, dy)
-                if dist_step > 0.1:
-                    gps_speed_kmh = (dist_step / dt) * 3.6
-                else:
-                    gps_speed_kmh = 0.0
+            # Check if this sample contains a genuinely new GPS fix from hardware
+            is_new_gps_fix = False
+            if self.last_gps_raw is None:
+                is_new_gps_fix = True
+            elif (abs(gps["lat"] - self.last_gps_raw["lat"]) > 1e-7 or
+                  abs(gps["lon"] - self.last_gps_raw["lon"]) > 1e-7):
+                is_new_gps_fix = True
 
-            if gps_speed_kmh is not None:
-                if gps_speed_kmh < 0.8:
-                    self.speed_kmh = 0.0
+            # Determine GPS speed:
+            target_speed_kmh = None
+
+            # Priority 1: speed_kmh provided by frontend (computed from distinct GPS timestamps)
+            if gps.get("speed_kmh") is not None and not math.isnan(gps["speed_kmh"]):
+                target_speed_kmh = float(gps["speed_kmh"])
+            # Priority 2: Browser coords.speed (in m/s)
+            elif gps.get("speed") is not None and not math.isnan(gps["speed"]) and float(gps["speed"]) >= 0:
+                target_speed_kmh = float(gps["speed"]) * 3.6
+            # Priority 3: Derived from successive distinct GPS coordinates
+            elif is_new_gps_fix and self.last_gps_fix_xy is not None:
+                dx = x - self.last_gps_fix_xy[0]
+                dy = y - self.last_gps_fix_xy[1]
+                dist = math.hypot(dx, dy)
+                now = time.time()
+                dt_fix = now - self.last_gps_fix_time if self.last_gps_fix_time > 0 else 1.0
+                if 0.4 <= dt_fix <= 10.0:
+                    if dist > 1.2:
+                        target_speed_kmh = (dist / dt_fix) * 3.6
+                    else:
+                        target_speed_kmh = 0.0
+
+            if is_new_gps_fix:
+                self.last_gps_raw = {"lat": gps["lat"], "lon": gps["lon"]}
+                self.last_gps_fix_xy = (x, y)
+                self.last_gps_fix_time = time.time()
+                self.gps_track.append((x, y))
+                if len(self.gps_track) > self.LONG_WINDOW:
+                    self.gps_track.pop(0)
+
+            # Update speed:
+            if target_speed_kmh is not None:
+                target_speed_kmh = min(160.0, max(0.0, target_speed_kmh))
+                if target_speed_kmh < 0.8:
+                    target_speed_kmh = 0.0
+                if self.speed_kmh == 0.0:
+                    self.speed_kmh = target_speed_kmh
                 else:
-                    self.speed_kmh = min(160.0, gps_speed_kmh)
+                    self.speed_kmh = 0.5 * self.speed_kmh + 0.5 * target_speed_kmh
                 self.last_gps_speed_kmh = self.speed_kmh
+            else:
+                # Same GPS fix held between 100ms sample ticks: MAINTAIN verified speed!
+                pass
+
+            if self.speed_kmh >= 3.0:
+                self.motion_state = "VEHICLE_DRIVING"
+                self.confidence = max(self.confidence, 92)
+            elif self.speed_kmh == 0.0 and self.motion_state != "HAND_DISTURBANCE":
+                self.motion_state = "STATIONARY"
 
             # Determine Heading
             if gps.get("heading") is not None and not math.isnan(gps["heading"]):
