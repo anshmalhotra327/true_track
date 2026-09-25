@@ -272,14 +272,61 @@ function handleDeviceMotion(e) {
 window.addEventListener('devicemotion', handleDeviceMotion, true);
 
 // ------------------------------------------------------------
-// 4. Geolocation (GNSS GPS Tracking)
+// 4. Client-Side Geodesic Frame & Autonomous S.A.F.A.R. Engine
 // ------------------------------------------------------------
+class LocalCartesianFrame {
+  constructor(latDeg, lonDeg) {
+    this.refLat = latDeg * (Math.PI / 180);
+    this.refLon = lonDeg * (Math.PI / 180);
+    this.cosRefLat = Math.cos(this.refLat);
+    this.earthRadius = 6371000.0;
+  }
+  toXY(latDeg, lonDeg) {
+    const lat = latDeg * (Math.PI / 180);
+    const lon = lonDeg * (Math.PI / 180);
+    const x = (lon - this.refLon) * this.cosRefLat * this.earthRadius;
+    const y = (lat - this.refLat) * this.earthRadius;
+    return [x, y];
+  }
+  toLatLon(x, y) {
+    const lat = this.refLat + y / this.earthRadius;
+    const lon = this.refLon + x / (this.earthRadius * this.cosRefLat);
+    return [lat * (180 / Math.PI), lon * (180 / Math.PI)];
+  }
+}
+
+// S.A.F.A.R. Client-Side Dead Reckoning State
+let localRefFrame = null;
+let localDrX = 0;
+let localDrY = 0;
+let localDrHeadingDeg = 0;
+let localSpeedKmh = 0.0;
+let lastConfirmedGpsSpeedKmh = 0.0;
+let lastGoodGps = null;
+let lastHardwareGpsTimestamp = 0;
+let wasGpsActive = false;
+let currentClientMode = 'GNSS'; // 'GNSS' or 'DR'
+let clientMotionState = 'STATIONARY';
+let clientConfidence = 95;
+let turnBias = 0.0;
+let warmupTurnRates = [];
+let disturbanceCooldown = 0;
+
+// Rolling buffers for IMU features (last 30 samples = 3.0s @ 10Hz)
+const imuBuf = {
+  linMag: [],
+  linZ: [],
+  gyroYaw: [],
+  maxLen: 30,
+};
+
 let latestGps = null;
 let hasGpsFix = false;
 let userHasPanned = false;
 let lastGeoPoint = null;
 let currentFusedSpeedKmh = 0.0;
 const MAX_ACCEPTABLE_ACCURACY_M = 100;
+const GPS_OUTAGE_THRESHOLD_MS = 2500; // 2.5s without hardware fix = tunnel/outage
 
 function haversineM(lat1, lon1, lat2, lon2) {
   const R = 6371000, toRad = Math.PI / 180;
@@ -298,6 +345,9 @@ function onGeoSuccess(pos) {
   const heading = pos.coords.heading;
   const now = pos.timestamp || Date.now();
 
+  lastHardwareGpsTimestamp = Date.now();
+  lastGoodGps = { lat, lon, time: lastHardwareGpsTimestamp };
+
   let fixSpeedKmh = null;
   if (rawSpeed !== null && !isNaN(rawSpeed) && rawSpeed >= 0) {
     fixSpeedKmh = rawSpeed * 3.6;
@@ -305,7 +355,6 @@ function onGeoSuccess(pos) {
     const dtSec = (now - lastGeoPoint.time) / 1000.0;
     if (dtSec >= 0.4 && dtSec <= 8.0) {
       const distM = haversineM(lastGeoPoint.lat, lastGeoPoint.lon, lat, lon);
-      // Filter stationary GPS jitter: only accept speed if distance moved exceeds GPS accuracy deadband
       const jitterDeadband = Math.max(1.8, Math.min(6.0, (acc || 8) * 0.35));
       if (distM > jitterDeadband) {
         fixSpeedKmh = (distM / dtSec) * 3.6;
@@ -336,6 +385,9 @@ function onGeoSuccess(pos) {
 
   if (!hasGpsFix) {
     hasGpsFix = true;
+    localRefFrame = new LocalCartesianFrame(lat, lon);
+    localDrX = 0;
+    localDrY = 0;
     map.setView([lat, lon], isNavigating ? 17 : 16, { animate: true });
     liveMarker.setLatLng([lat, lon]);
     liveTrail.setLatLngs([[lat, lon]]);
@@ -344,19 +396,13 @@ function onGeoSuccess(pos) {
   if (latestCompassHeading == null && heading != null && !isNaN(heading) && (currentFusedSpeedKmh || 0) > 1.0) {
     updateHeadingUI(heading);
   }
-
-  // Immediate UI responsiveness: update speed display right away!
-  if (!isSimulatedOutage && hasGpsFix) {
-    const spdStr = currentFusedSpeedKmh.toFixed(1);
-    const speedEl = document.getElementById('hud-speed');
-    const drawerSpeedEl = document.getElementById('drawer-speed');
-    if (speedEl) speedEl.textContent = spdStr;
-    if (drawerSpeedEl) drawerSpeedEl.textContent = spdStr;
-  }
 }
 
 function onGeoError(err) {
-  console.warn('Geolocation notice:', err.message);
+  console.warn('Geolocation notice:', err.code, err.message);
+  if (err.code === 2 || err.code === 3) {
+    hasGpsFix = false;
+  }
 }
 
 if (navigator.geolocation) {
@@ -375,27 +421,30 @@ map.on('dragstart', () => {
 document.getElementById('btn-recenter').onclick = () => {
   userHasPanned = false;
   document.getElementById('btn-recenter').classList.add('active');
-  const target = latestGps ? [latestGps.lat, latestGps.lon] : liveMarker.getLatLng();
+  const target = (currentClientMode === 'GNSS' && latestGps) ? [latestGps.lat, latestGps.lon] : liveMarker.getLatLng();
   map.setView(target, isNavigating ? 17 : 16, { animate: true });
 };
 
 // ------------------------------------------------------------
-// 5. Backend Live Session & 10Hz Dead Reckoning Loop
+// 5. Autonomous Client-Side S.A.F.A.R. Engine & Outage Watchdog
 // ------------------------------------------------------------
 let liveSessionId = null;
 let isDispatching = false;
 let isSimulatedOutage = false;
 
+// Optional background cloud session initialization
 async function initLiveBackendSession() {
+  if (!navigator.onLine) return;
   try {
-    const res = await fetch('/api/live/session/start', { method: 'POST' });
+    const res = await fetch('/api/live/session/start', {
+      method: 'POST',
+      signal: AbortSignal.timeout(2000),
+    });
     if (res.ok) {
       const data = await res.json();
       liveSessionId = data.session_id;
     }
-  } catch (err) {
-    console.warn('Backend live session init:', err.message);
-  }
+  } catch (_) {}
 }
 initLiveBackendSession();
 
@@ -403,7 +452,6 @@ const toggleOutage = document.getElementById('toggle-outage');
 if (toggleOutage) {
   toggleOutage.onchange = () => {
     isSimulatedOutage = toggleOutage.checked;
-    updateModeDisplay(isSimulatedOutage ? 'DR' : 'GNSS');
   };
 }
 
@@ -416,7 +464,7 @@ function updateModeDisplay(mode) {
     badge.className = 'mode-badge mode-dr';
     text.textContent = 'S.A.F.A.R. IDR';
     banner.classList.remove('hidden');
-    if (toggleOutage) toggleOutage.checked = true;
+    if (toggleOutage) toggleOutage.checked = isSimulatedOutage;
   } else {
     badge.className = 'mode-badge mode-gnss';
     text.textContent = 'GNSS Active';
@@ -425,88 +473,225 @@ function updateModeDisplay(mode) {
   }
 }
 
-function updateHUD(data) {
+// ------------------------------------------------------------
+// Real-time 10Hz Client-Side S.A.F.A.R. Dead Reckoning Loop
+// Runs 100% locally on device CPU with ZERO internet dependency!
+// ------------------------------------------------------------
+const DT = 0.1; // 100ms timestep
+
+function safeTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
+setInterval(() => {
+  // 1. Evaluate GPS Outage Status (Watchdog + Manual Outage Toggle)
+  const gpsSilenceMs = Date.now() - lastHardwareGpsTimestamp;
+  const isOutage = isSimulatedOutage || !hasGpsFix || (gpsSilenceMs > GPS_OUTAGE_THRESHOLD_MS);
+  currentClientMode = isOutage ? 'DR' : 'GNSS';
+
+  // 2. Extract IMU Motion and Energy
+  const linX = (latestAccel.x || 0) - (latestGravityEst.x || 0);
+  const linY = (latestAccel.y || 0) - (latestGravityEst.y || 0);
+  const linZ = (latestAccel.z || 0) - (latestGravityEst.z || 0);
+  const linMag = Math.sqrt(linX * linX + linY * linY + linZ * linZ);
+
+  imuBuf.linMag.push(linMag);
+  imuBuf.linZ.push(linZ);
+  imuBuf.gyroYaw.push(latestGyro.yaw || 0);
+  if (imuBuf.linMag.length > imuBuf.maxLen) {
+    imuBuf.linMag.shift();
+    imuBuf.linZ.shift();
+    imuBuf.gyroYaw.shift();
+  }
+
+  // Calculate rolling statistics
+  const n = imuBuf.linMag.length;
+  let linMean = 0;
+  for (let i = 0; i < n; i++) linMean += imuBuf.linMag[i];
+  linMean = n > 0 ? linMean / n : 0;
+
+  let linVar = 0;
+  for (let i = 0; i < n; i++) linVar += (imuBuf.linMag[i] - linMean) ** 2;
+  const linStd = n > 1 ? Math.sqrt(linVar / (n - 1)) : 0;
+
+  const gyroMag = Math.sqrt((latestGyro.yaw || 0) ** 2 + (latestGyro.pitch || 0) ** 2 + (latestGyro.roll || 0) ** 2);
+
+  // Decompose Gyro onto Earth-Vertical (Gravity) Vector
+  const gNorm = Math.sqrt((latestGravityEst.x || 0) ** 2 + (latestGravityEst.y || 0) ** 2 + (latestGravityEst.z || 0) ** 2) || 9.81;
+  const gUnit = [(latestGravityEst.x || 0) / gNorm, (latestGravityEst.y || 0) / gNorm, (latestGravityEst.z || 0) / gNorm];
+  const omegaTurn = (latestGyro.pitch || 0) * gUnit[0] + (latestGyro.roll || 0) * gUnit[1] + (latestGyro.yaw || 0) * gUnit[2];
+  const tiltRateMag = Math.sqrt(Math.max(0, gyroMag ** 2 - omegaTurn ** 2));
+
+  // 3. Motion Classification (ZUPT / Disturbance / Driving)
+  const isImuQuiet = (linStd < 0.22 && linMean < 0.35 && gyroMag < 0.18);
+
+  if (isImuQuiet) {
+    if (localSpeedKmh < 1.5) {
+      clientMotionState = 'STATIONARY';
+      clientConfidence = 98;
+    } else {
+      clientMotionState = 'COASTING_TO_STOP';
+      clientConfidence = 92;
+    }
+  } else if (localSpeedKmh < 3.5 && (gyroMag > 1.2 || tiltRateMag > 1.0)) {
+    clientMotionState = 'HAND_DISTURBANCE';
+    clientConfidence = 30;
+    disturbanceCooldown = 10;
+  } else {
+    if (disturbanceCooldown > 0) disturbanceCooldown--;
+    clientMotionState = 'VEHICLE_DRIVING';
+    clientConfidence = Math.min(96, Math.max(75, Math.round(96 - linStd * 3)));
+  }
+
+  // 4. Navigation & Speed Fusion Execution
+  if (!isOutage && latestGps) {
+    // ---------------- GNSS SATELLITE ACTIVE ----------------
+    wasGpsActive = true;
+    localSpeedKmh = currentFusedSpeedKmh;
+    lastConfirmedGpsSpeedKmh = currentFusedSpeedKmh;
+
+    if (localRefFrame) {
+      localRefFrame = new LocalCartesianFrame(latestGps.lat, latestGps.lon);
+      localDrX = 0;
+      localDrY = 0;
+    }
+
+    // Calibrate turn rate bias while driving with GPS
+    if (currentFusedSpeedKmh > 5.0 && Math.abs(omegaTurn) < 0.3) {
+      warmupTurnRates.push(omegaTurn);
+      if (warmupTurnRates.length > 30) warmupTurnRates.shift();
+      if (warmupTurnRates.length >= 10) {
+        const sorted = [...warmupTurnRates].sort((a, b) => a - b);
+        turnBias = sorted[Math.floor(sorted.length / 2)];
+      }
+    }
+
+    liveMarker.setLatLng([latestGps.lat, latestGps.lon]);
+    liveTrail.addLatLng([latestGps.lat, latestGps.lon]);
+    if (!userHasPanned) {
+      map.panTo([latestGps.lat, latestGps.lon], { animate: true, duration: 0.1 });
+    }
+  } else {
+    // ---------------- S.A.F.A.R. DEAD RECKONING (TUNNEL / NO GPS / NO INTERNET) ----------------
+    if (wasGpsActive || !localRefFrame) {
+      wasGpsActive = false;
+      const refLat = lastGoodGps ? lastGoodGps.lat : liveMarker.getLatLng().lat;
+      const refLon = lastGoodGps ? lastGoodGps.lon : liveMarker.getLatLng().lng;
+      localRefFrame = new LocalCartesianFrame(refLat, refLon);
+      localDrX = 0;
+      localDrY = 0;
+      localSpeedKmh = Math.max(0.0, lastConfirmedGpsSpeedKmh);
+      if (latestCompassHeading != null) {
+        localDrHeadingDeg = latestCompassHeading;
+      }
+    }
+
+    // Kinematic Speed Estimation
+    if (clientMotionState === 'STATIONARY') {
+      localSpeedKmh = 0.0;
+    } else if (isImuQuiet) {
+      // Quiet phone = vehicle decelerating / braking to a halt
+      const brakeDelta = 3.0 * 3.6 * DT; // ~1.08 km/h per 100ms
+      localSpeedKmh = Math.max(0.0, localSpeedKmh - brakeDelta);
+      if (localSpeedKmh < 1.0) {
+        localSpeedKmh = 0.0;
+        clientMotionState = 'STATIONARY';
+      }
+    } else if (clientMotionState === 'HAND_DISTURBANCE') {
+      localSpeedKmh *= Math.exp(-DT / 0.8);
+      if (localSpeedKmh < 0.5) localSpeedKmh = 0.0;
+    } else {
+      // VEHICLE_DRIVING: Model speed using vibration energy & acceleration
+      const vibSpeed = 24.0 * Math.sqrt(Math.max(0, linStd - 0.18));
+      let targetSpeed = Math.max(localSpeedKmh * 0.994, vibSpeed);
+      targetSpeed = Math.min(130.0, Math.max(0.0, targetSpeed));
+      const maxDelta = 2.5 * 3.6 * DT; // Physical acceleration bound: 2.5 m/s^2 (~0.9 km/h per 100ms)
+      const delta = Math.max(-maxDelta * 1.5, Math.min(maxDelta, targetSpeed - localSpeedKmh));
+      localSpeedKmh = Math.max(0.0, localSpeedKmh + delta);
+    }
+
+    // Dynamic Heading Update
+    if (latestCompassHeading != null) {
+      localDrHeadingDeg = latestCompassHeading;
+    } else {
+      const effTurnRate = (omegaTurn - turnBias) * (180 / Math.PI);
+      if (Math.abs(effTurnRate) > 0.8) {
+        localDrHeadingDeg = (localDrHeadingDeg + effTurnRate * DT + 360) % 360;
+      }
+    }
+    updateHeadingUI(localDrHeadingDeg);
+
+    // Non-Holonomic Constraint (NHC) Advance in Local Frame
+    if (localRefFrame) {
+      const speedMs = localSpeedKmh / 3.6;
+      const headingRad = (localDrHeadingDeg * Math.PI) / 180;
+      localDrX += speedMs * Math.sin(headingRad) * DT; // East (x)
+      localDrY += speedMs * Math.cos(headingRad) * DT; // North (y)
+
+      const [newLat, newLon] = localRefFrame.toLatLon(localDrX, localDrY);
+      liveMarker.setLatLng([newLat, newLon]);
+      liveTrail.addLatLng([newLat, newLon]);
+
+      if (!userHasPanned) {
+        map.panTo([newLat, newLon], { animate: true, duration: 0.1 });
+      }
+    }
+  }
+
+  // 5. Update UI Components Instantly (Zero Network Wait)
+  const spdText = localSpeedKmh.toFixed(1);
   const speedEl = document.getElementById('hud-speed');
   const drawerSpeedEl = document.getElementById('drawer-speed');
   const confEl = document.getElementById('hud-conf');
   const confBar = document.getElementById('hud-conf-bar');
   const motionEl = document.getElementById('hud-motion');
 
-  // Digital Speed: Prefer verified frontend GPS speed when GNSS is active and moving; otherwise use backend fused speed
-  let displaySpeed = '0.0';
-  if (!isSimulatedOutage && hasGpsFix && currentFusedSpeedKmh > 0) {
-    displaySpeed = currentFusedSpeedKmh.toFixed(1);
-  } else if (data.speed_kmh != null) {
-    displaySpeed = data.speed_kmh.toFixed(1);
-  }
+  if (speedEl) speedEl.textContent = spdText;
+  if (drawerSpeedEl) drawerSpeedEl.textContent = spdText;
 
-  if (speedEl) speedEl.textContent = displaySpeed;
-  if (drawerSpeedEl) drawerSpeedEl.textContent = displaySpeed;
-
-  // Heading fallback if no compass
-  if (latestCompassHeading == null && data.heading_deg != null) {
-    updateHeadingUI(data.heading_deg);
-  }
-
-  // Navigation Confidence
-  const conf = data.confidence != null ? data.confidence : 95;
-  if (confEl) confEl.textContent = `${conf}%`;
+  if (confEl) confEl.textContent = `${clientConfidence}%`;
   if (confBar) {
-    confBar.style.width = `${conf}%`;
-    confBar.style.background = conf >= 75 ? 'var(--google-green)' : conf >= 50 ? 'var(--google-amber)' : 'var(--google-red)';
+    confBar.style.width = `${clientConfidence}%`;
+    confBar.style.background = clientConfidence >= 75 ? 'var(--google-green)' : clientConfidence >= 50 ? 'var(--google-amber)' : 'var(--google-red)';
   }
 
-  // Motion State
   const motionMap = {
     'STATIONARY': 'Stationary (ZUPT)',
+    'COASTING_TO_STOP': 'Braking / Coasting',
     'HAND_DISTURBANCE': 'Disturbance Filtered',
     'VEHICLE_DRIVING': 'Vehicle Kinematics',
   };
   if (motionEl) {
-    motionEl.textContent = motionMap[data.motion_state] || (data.motion_state || 'Stationary (ZUPT)');
+    motionEl.textContent = motionMap[clientMotionState] || clientMotionState;
   }
 
-  updateModeDisplay(data.mode);
-}
+  updateModeDisplay(currentClientMode);
 
-// 10Hz Telemetry & S.A.F.A.R. Fusion Loop
-setInterval(async () => {
-  if (!liveSessionId || isDispatching) return;
-
-  isDispatching = true;
-  try {
-    const isOutage = isSimulatedOutage || !hasGpsFix;
+  // 6. Asynchronous Non-Blocking Cloud Telemetry (Zero network requests during outage / dead zones)
+  if (navigator.onLine && !isOutage && liveSessionId && !isDispatching) {
+    isDispatching = true;
     const body = {
       accel: latestAccel,
       gravity: latestGravityEst,
       gyro: latestGyro,
-      gps: (!isOutage && latestGps) ? latestGps : null,
-      simulate_outage: isSimulatedOutage,
-      dt: 0.1,
+      gps: latestGps,
+      simulate_outage: false,
+      dt: DT,
     };
 
-    const res = await fetch(`/api/live/session/${liveSessionId}/sample`, {
+    fetch(`/api/live/session/${liveSessionId}/sample`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: safeTimeoutSignal(350),
+    }).catch(() => {}).finally(() => {
+      isDispatching = false;
     });
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data.lat != null && data.lon != null) {
-        liveMarker.setLatLng([data.lat, data.lon]);
-        liveTrail.addLatLng([data.lat, data.lon]);
-
-        if (!userHasPanned) {
-          map.panTo([data.lat, data.lon], { animate: true, duration: 0.1 });
-        }
-      }
-      updateHUD(data);
-    }
-  } catch (err) {
-    console.warn('Live sample sync:', err.message);
-  } finally {
-    isDispatching = false;
   }
 }, 100);
 
