@@ -1,57 +1,84 @@
 """
-fusion.py — S.A.F.A.R. (Sensor-Aided Fusion for Accurate Routing)
-Intelligent Dead Reckoning and Sensor Fusion Engine (SIH 26168).
+fusion.py — S.A.F.A.R. Navigation & Sensor Fusion Engine
 
-Key Modules:
-1. In-Vehicle Alignment & Calibration Engine:
-   - Projects 3D gyroscope and linear acceleration onto Earth-vertical (gravity)
-     and vehicle forward/lateral axes.
-   - Extracts true vehicle horizontal yaw rate around the gravity axis, independent
-     of phone pitch/roll mounting angle.
-2. Disturbance / Confidence Model:
-   - Identifies STATIONARY (Zero-Velocity Update, ZUPT) to prevent indoor/desk drift.
-   - Quarantines HAND_DISTURBANCE (accidental tilts, hand jerks, gestures) where
-     erratic 3D rotation rates occur without vehicle kinematics, preventing 40-50 km/h spikes.
-   - Confirms VEHICLE_DRIVING when forward dynamics and road texture match driving kinematics.
-   - Computes live Confidence Level (0 - 100%).
-3. Physics-Constrained AI Speed Estimator:
-   - Bounded by road vehicle acceleration limits (|dv/dt| <= 3.0 m/s^2).
-   - Seamless hand-off from last confirmed GNSS speed when entering a blackout.
-4. Non-Holonomic Constraints (NHC) & Dynamic Heading:
-   - Enforces v_lateral = 0, v_vertical = 0.
-   - Updates vehicle heading during outages via calibrated turn rate.
-5. Naive Dead Reckoning Baseline:
-   - Double-integration baseline kept for benchmark comparison.
+Integrates Extended Kalman Filtering (EKF), phone-to-vehicle coordinate frame
+transformations, continuous state transitions (GNSS_LOCKED -> GNSS_WEAK -> TRANSITION ->
+GNSS_DENIED -> RECOVERING -> RELOCKED), gradual error recovery decoupling, and component-wise
+confidence scoring.
 """
-import time
+
 import math
 import numpy as np
 
 from .geo import LocalFrame
 from .data_utils import compute_features_at
+from .ekf import ExtendedKalmanFilter
 
 
-def _heading_rotation_naive(orient_yaw_deg, orient_pitch_deg, orient_roll_deg):
-    """Rough Euler rotation (device frame -> world-ish frame) used ONLY for the
-    naive baseline, to demonstrate how quickly uncorrected integration drifts."""
-    yaw, pitch, roll = np.radians(orient_yaw_deg), np.radians(orient_pitch_deg), np.radians(orient_roll_deg)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cr, sr = np.cos(roll), np.sin(roll)
-    return cy, sy, cp, sp, cr, sr
+def phone_to_vehicle_frame(accel_x, accel_y, accel_z, grav_x, grav_y, grav_z):
+    """
+    Transforms phone-frame acceleration vector to vehicle-aligned frame using gravity vector.
+    Assumes vehicle vertical axis aligns with gravity vector direction, and vehicle longitudinal axis
+    is in the horizontal plane.
+    """
+    g_mag = math.hypot(grav_x, grav_y, grav_z)
+    if g_mag < 1e-3:
+        return accel_x, accel_y, accel_z
+
+    # Gravity unit vector (Vehicle Z-down / Z-up reference)
+    gz_unit = np.array([grav_x / g_mag, grav_y / g_mag, grav_z / g_mag])
+
+    # Linear acceleration with gravity removed
+    lin_acc = np.array([accel_x - grav_x, accel_y - grav_y, accel_z - grav_z])
+
+    # Vertical linear acceleration (along gravity vector)
+    a_vert_mag = float(np.dot(lin_acc, gz_unit))
+
+    # Horizontal linear acceleration vector (in phone plane orthogonal to gravity)
+    a_horiz_vec = lin_acc - a_vert_mag * gz_unit
+    a_horiz_mag = float(np.linalg.norm(a_horiz_vec))
+
+    # Forward acceleration component (projected)
+    a_forward = a_horiz_mag if (lin_acc[1] * grav_z - lin_acc[2] * grav_y) >= 0 else -a_horiz_mag
+    a_lateral = float(lin_acc[0])  # approx lateral
+
+    return a_forward, a_lateral, a_vert_mag
+
+
+def compute_confidence_score(mode, gps_accuracy=None, speed_kmh=0.0, pos_uncertainty_m=1.0, is_stationary=False):
+    """
+    Calculates overall Navigation Position Confidence Score (0% to 100%).
+    Combines sensor status, GNSS accuracy, state estimation variance, and vehicle motion state.
+    """
+    if mode == "GNSS":
+        if gps_accuracy is not None and gps_accuracy > 0:
+            conf = max(40.0, 100.0 - (gps_accuracy * 1.2))
+        else:
+            conf = 95.0
+    elif mode in ("TRANSITION", "DR"):
+        base = 88.0
+        # Decay confidence based on state uncertainty
+        penalty = min(50.0, pos_uncertainty_m * 2.5)
+        conf = max(15.0, base - penalty)
+    elif mode == "RECOVERING":
+        conf = 75.0
+    else:
+        conf = 20.0
+
+    if is_stationary:
+        conf = min(100.0, conf + 5.0)
+
+    return round(float(conf), 1)
 
 
 def naive_dead_reckoning(df, start_idx, end_idx, ref_frame: LocalFrame):
-    """Double-integrate raw linear acceleration from start_idx to end_idx.
-    Returns array of (x, y) positions in local meters, one per sample."""
+    """Double-integrate raw linear acceleration from start_idx to end_idx baseline."""
     lin_x = (df["accel_x"] - df["gravity_x"]).values[start_idx:end_idx]
     lin_y = (df["accel_y"] - df["gravity_y"]).values[start_idx:end_idx]
     yaw = df["orient_yaw"].values[start_idx:end_idx]
-    pitch = df["orient_pitch"].values[start_idx:end_idx]
-    roll = df["orient_roll"].values[start_idx:end_idx]
     dt = 0.1
 
-    cy, sy, cp, sp, cr, sr = _heading_rotation_naive(yaw, pitch, roll)
+    cy, sy = np.cos(np.radians(yaw)), np.sin(np.radians(yaw))
     world_ax = cy * lin_x - sy * lin_y
     world_ay = sy * lin_x + cy * lin_y
 
@@ -75,93 +102,106 @@ def naive_dead_reckoning(df, start_idx, end_idx, ref_frame: LocalFrame):
 
 def ai_fused_dead_reckoning(df, start_idx, end_idx, ref_frame: LocalFrame, model_bundle):
     """
-    S.A.F.A.R. AI-Fused Dead Reckoning (batch mode for evaluation & replay).
-    - Starts with seamless hand-off of entry speed from GNSS.
-    - Uses calibrated gravity-projected turn rate to track real heading changes.
-    - AI velocity model blends with forward kinematics and NHC constraints.
+    AI-speed + EKF state estimation dead reckoning for offline trips.
     """
     model = model_bundle["model"]
     window = model_bundle["window"]
-    n = end_idx - start_idx
-    dt = 0.1
 
-    # Calibrate initial heading from pre-blackout GPS trajectory (2s baseline)
-    calib_n = min(30, start_idx)
-    calib_lats = df["lat"].values[start_idx - calib_n:start_idx + 1]
-    calib_lons = df["lon"].values[start_idx - calib_n:start_idx + 1]
+    calib_n = 50
+    calib_lats = df["lat"].values[max(0, start_idx - calib_n):start_idx + 1]
+    calib_lons = df["lon"].values[max(0, start_idx - calib_n):start_idx + 1]
     cx, cy = zip(*[ref_frame.to_xy(la, lo) for la, lo in zip(calib_lats, calib_lons)])
     cx, cy = np.array(cx), np.array(cy)
-    heading0 = math.atan2(cy[-1] - cy[0], cx[-1] - cx[0])
 
-    # Calibrate gyro turn bias over the pre-blackout period
-    # Turn rate is projected onto gravity unit vector (Earth vertical down)
-    warmup_gyros = np.column_stack([
-        df["gyro_pitch"].values[start_idx - calib_n:start_idx],
-        df["gyro_roll"].values[start_idx - calib_n:start_idx],
-        df["gyro_yaw"].values[start_idx - calib_n:start_idx]
-    ])
-    warmup_gravs = np.column_stack([
-        df["gravity_x"].values[start_idx - calib_n:start_idx],
-        df["gravity_y"].values[start_idx - calib_n:start_idx],
-        df["gravity_z"].values[start_idx - calib_n:start_idx]
-    ])
-    warmup_gu = warmup_gravs / np.linalg.norm(warmup_gravs, axis=1, keepdims=True)
-    turn_bias = float(np.mean(np.sum(warmup_gyros * warmup_gu, axis=1)))
+    dx_win = cx[-1] - cx[0]
+    dy_win = cy[-1] - cy[0]
+    dist = np.hypot(dx_win, dy_win)
+    heading0 = math.atan2(dy_win, dx_win)
 
-    # Turn rates during blackout
-    blackout_gyros = np.column_stack([
-        df["gyro_pitch"].values[start_idx:end_idx],
-        df["gyro_roll"].values[start_idx:end_idx],
-        df["gyro_yaw"].values[start_idx:end_idx]
-    ])
-    blackout_gravs = np.column_stack([
-        df["gravity_x"].values[start_idx:end_idx],
-        df["gravity_y"].values[start_idx:end_idx],
-        df["gravity_z"].values[start_idx:end_idx]
-    ])
-    blackout_gu = blackout_gravs / np.linalg.norm(blackout_gravs, axis=1, keepdims=True)
-    turn_rates = np.sum(blackout_gyros * blackout_gu, axis=1) - turn_bias
+    time_span = (len(cx) - 1) * 0.1
+    gps_speed_ms = (dist / time_span) if time_span > 0 else 0.0
+    gps_speed_kmh = gps_speed_ms * 3.6
+    gyro_bias = float(np.median(df["gyro_yaw"].values[max(0, start_idx - calib_n):start_idx]))
 
-    # Compute AI speed predictions
-    feats = []
-    for i in range(start_idx, end_idx):
-        feats.append(compute_features_at(df, i, window=window))
-    X = np.array(feats)
-    raw_ai_speeds = np.maximum(0.0, model.predict(X))
+    pre_feats = [compute_features_at(df, i, window=window) for i in range(max(0, start_idx - calib_n), start_idx)]
+    if len(pre_feats) > 0:
+        pre_ai_speeds = model.predict(np.array(pre_feats))
+        mean_pre_ai_speed = float(np.mean(pre_ai_speeds))
+        if mean_pre_ai_speed > 5.0 and gps_speed_kmh > 5.0:
+            speed_scale = max(0.5, min(2.5, gps_speed_kmh / mean_pre_ai_speed))
+        else:
+            speed_scale = 1.0
+    else:
+        speed_scale = 1.0
 
-    # Entry speed from GPS
-    entry_speed_kmh = float(df["speed_kmh"].values[start_idx])
-    v_kmh = entry_speed_kmh
-    max_delta_kmh = 3.0 * 3.6 * dt  # max vehicle acceleration ~3 m/s^2
+    feats = [compute_features_at(df, i, window=window) for i in range(start_idx, end_idx)]
+    raw_speed_kmh = model.predict(np.array(feats))
 
     lat0, lon0 = df["lat"].values[start_idx], df["lon"].values[start_idx]
     x0, y0 = ref_frame.to_xy(lat0, lon0)
 
+    n = end_idx - start_idx
     xs, ys = np.zeros(n), np.zeros(n)
-    speed_kmh_out = np.zeros(n)
-    x, y = x0, y0
-    heading = heading0
+    speed_out = np.zeros(n)
+    dt = 0.1
+
+    init_vx = gps_speed_ms * math.cos(heading0)
+    init_vy = gps_speed_ms * math.sin(heading0)
+
+    ekf = ExtendedKalmanFilter(initial_x=x0, initial_y=y0, initial_vx=init_vx, initial_vy=init_vy, initial_heading=heading0)
+    ekf.x[5, 0] = gyro_bias
+
+    accel_x = df["accel_x"].values[start_idx:end_idx]
+    accel_y = df["accel_y"].values[start_idx:end_idx]
+    accel_z = df["accel_z"].values[start_idx:end_idx]
+    grav_x = df["gravity_x"].values[start_idx:end_idx]
+    grav_y = df["gravity_y"].values[start_idx:end_idx]
+    grav_z = df["gravity_z"].values[start_idx:end_idx]
+    gyro_yaw = df["gyro_yaw"].values[start_idx:end_idx]
+
+    current_speed_ms = gps_speed_ms
 
     for i in range(n):
-        # Update heading with deadband
-        omega = turn_rates[i]
-        if abs(omega) > 0.005:  # ~0.3 deg/s deadband
-            heading += omega * dt
+        ax_v, ay_v, _ = phone_to_vehicle_frame(
+            accel_x[i], accel_y[i], accel_z[i],
+            grav_x[i], grav_y[i], grav_z[i]
+        )
+        a_forward = float(np.clip(ax_v, -3.0, 3.0))
+        if abs(a_forward) < 0.15:
+            a_forward = 0.0
 
-        # Smooth kinematic speed blend with AI estimate
-        ai_target = raw_ai_speeds[i]
-        delta = ai_target - v_kmh
-        delta = max(-max_delta_kmh * 2.0, min(max_delta_kmh, delta))
-        v_kmh = max(0.0, v_kmh + delta)
-        speed_kmh_out[i] = v_kmh
+        ekf.predict(ax_veh=a_forward, ay_veh=ay_v, gyro_yaw=gyro_yaw[i], dt=dt)
 
-        # Non-Holonomic Constraint (NHC): advance along heading
-        speed_ms = v_kmh / 3.6
-        x += speed_ms * math.cos(heading) * dt
-        y += speed_ms * math.sin(heading) * dt
-        xs[i], ys[i] = x, y
+        v_ai_kmh = max(0.0, float(raw_speed_kmh[i]) * speed_scale)
+        if v_ai_kmh < 5.0 and gps_speed_kmh > 5.0 and a_forward >= -0.3:
+            v_eff_ai = gps_speed_kmh
+        else:
+            v_eff_ai = v_ai_kmh
 
-    return xs, ys, speed_kmh_out
+        delta_v_phys_kmh = float(np.clip(a_forward, -2.0, 2.0)) * dt * 3.6
+        candidate_kmh = current_speed_ms * 3.6 + delta_v_phys_kmh
+        
+        # Fuse candidate physics speed with AI speed prediction
+        target_kmh = 0.85 * v_eff_ai + 0.15 * candidate_kmh
+        target_kmh = float(np.clip(target_kmh, max(0.0, v_eff_ai - 15.0), v_eff_ai + 15.0))
+
+        fused_speed_ms = max(0.0, target_kmh / 3.6)
+        current_speed_ms = fused_speed_ms
+        speed_out[i] = target_kmh
+
+        ekf.update_ai_motion(ai_speed_ms=fused_speed_ms)
+
+        # Straight-road heading stabilization when turn rate is near zero
+        gyro_corr = gyro_yaw[i] - gyro_bias
+        if abs(gyro_corr) < 0.015:
+            h_err = math.atan2(math.sin(heading0 - ekf.x[4, 0]), math.cos(heading0 - ekf.x[4, 0]))
+            if abs(h_err) < 0.25: # within ~14 degrees of road heading
+                ekf.x[4, 0] += 0.02 * h_err
+
+        st = ekf.get_state()
+        xs[i], ys[i] = st["x"], st["y"]
+
+    return xs, ys, speed_out
 
 
 def ground_truth_positions(df, start_idx, end_idx, ref_frame: LocalFrame):
@@ -173,9 +213,7 @@ def ground_truth_positions(df, start_idx, end_idx, ref_frame: LocalFrame):
 
 class OnlineFusionSession:
     """
-    S.A.F.A.R. Real-time Incremental Fusion Session (10Hz streaming).
-    Processes live phone sensor streams (accel, gravity, gyro, gps) and produces
-    drift-resistant position, speed, compass heading, confidence, and motion classification.
+    Unified incremental Navigation & Sensor Fusion Session using Extended Kalman Filter (EKF).
     """
     LONG_WINDOW = 30
     SHORT_WINDOW = 10
@@ -184,129 +222,31 @@ class OnlineFusionSession:
         self.model = model_bundle["model"]
         self.buf_lin_x, self.buf_lin_y, self.buf_lin_z = [], [], []
         self.buf_gyro_yaw, self.buf_gyro_pitch, self.buf_gyro_roll = [], [], []
-        self.buf_grav_x, self.buf_grav_y, self.buf_grav_z = [], [], []
-
-        self.gps_track = []  # list of (x, y) in local meters
+        self.gps_track = []
         self.ref_frame = None
-        self.mode = "GNSS"
-        self.motion_state = "STATIONARY"  # STATIONARY, HAND_DISTURBANCE, VEHICLE_DRIVING
-        self.confidence = 95
 
-        self.dr_x = self.dr_y = None
-        self.dr_heading = 0.0
-        self.speed_kmh = 0.0
-        self.last_gps_speed_kmh = 0.0
-        self.last_gps_raw = None
-        self.last_gps_fix_time = 0.0
-        self.last_gps_fix_xy = None
-        self.turn_bias = 0.0
-        self.warmup_turn_rates = []
-        self.disturbance_cooldown = 0
+        self.mode = "GNSS"
+        self.ekf = None
+        self.speed_scale = 1.0
+        self.last_confirmed_speed_ms = 0.0
+        self.last_confirmed_heading = 0.0
+        self.last_confirmed_x = 0.0
+        self.last_confirmed_y = 0.0
+        self.gyro_bias = 0.0
+        self.recovery_alpha = 0.15  # Exponential recovery smoothing factor
 
     def _push_imu(self, accel, gravity, gyro):
-        lx = accel["x"] - gravity["x"]
-        ly = accel["y"] - gravity["y"]
-        lz = accel["z"] - gravity["z"]
-
-        self.buf_lin_x.append(lx)
-        self.buf_lin_y.append(ly)
-        self.buf_lin_z.append(lz)
+        self.buf_lin_x.append(accel["x"] - gravity["x"])
+        self.buf_lin_y.append(accel["y"] - gravity["y"])
+        self.buf_lin_z.append(accel["z"] - gravity["z"])
         self.buf_gyro_yaw.append(gyro["yaw"])
         self.buf_gyro_pitch.append(gyro["pitch"])
         self.buf_gyro_roll.append(gyro["roll"])
-        self.buf_grav_x.append(gravity["x"])
-        self.buf_grav_y.append(gravity["y"])
-        self.buf_grav_z.append(gravity["z"])
-
-        maxlen = self.LONG_WINDOW + 10
+        maxlen = self.LONG_WINDOW + 5
         for buf in (self.buf_lin_x, self.buf_lin_y, self.buf_lin_z,
-                    self.buf_gyro_yaw, self.buf_gyro_pitch, self.buf_gyro_roll,
-                    self.buf_grav_x, self.buf_grav_y, self.buf_grav_z):
+                    self.buf_gyro_yaw, self.buf_gyro_pitch, self.buf_gyro_roll):
             if len(buf) > maxlen:
                 del buf[0]
-
-    def _analyze_motion(self):
-        """
-        Disturbance / Confidence Model (Slide 3):
-        Decomposes 3D gyro into Earth-vertical turn rate and orthogonal tilt disturbance.
-        Detects STATIONARY (ZUPT), HAND_DISTURBANCE, or VEHICLE_DRIVING.
-        """
-        s = min(len(self.buf_lin_x), self.SHORT_WINDOW)
-        if s < 3:
-            return "STATIONARY", 90, 0.0, 0.0
-
-        lx = np.array(self.buf_lin_x[-s:])
-        ly = np.array(self.buf_lin_y[-s:])
-        lz = np.array(self.buf_lin_z[-s:])
-        gyaw = np.array(self.buf_gyro_yaw[-s:])
-        gpitch = np.array(self.buf_gyro_pitch[-s:])
-        groll = np.array(self.buf_gyro_roll[-s:])
-
-        # Current gravity unit vector (Earth vertical down in phone body coordinates)
-        gx, gy, gz = self.buf_grav_x[-1], self.buf_grav_y[-1], self.buf_grav_z[-1]
-        g_norm = math.sqrt(gx**2 + gy**2 + gz**2)
-        if g_norm < 1e-4:
-            g_unit = np.array([0.0, 0.0, 1.0])
-        else:
-            g_unit = np.array([gx, gy, gz]) / g_norm
-
-        # Gyro vector in body frame: [pitch, roll, yaw]
-        gyro_vec = np.array([gpitch[-1], groll[-1], gyaw[-1]])
-
-        # Vehicle turn rate around Earth vertical (gravity vector):
-        turn_rate = float(np.dot(gyro_vec, g_unit))
-
-        # Tilt / handling disturbance: component orthogonal to Earth vertical
-        tilt_rate_vec = gyro_vec - turn_rate * g_unit
-        tilt_rate_mag = float(np.linalg.norm(tilt_rate_vec))
-
-        # Linear acceleration energy
-        lin_mag = np.sqrt(lx**2 + ly**2 + lz**2)
-        lin_std = float(lin_mag.std())
-        gyro_mag = float(np.linalg.norm(gyro_vec))
-
-        # Check gravity stability (is phone rotating in hand?)
-        if len(self.buf_grav_x) >= 5:
-            g_delta = math.sqrt(
-                (gx - self.buf_grav_x[-5])**2 +
-                (gy - self.buf_grav_y[-5])**2 +
-                (gz - self.buf_grav_z[-5])**2
-            )
-        else:
-            g_delta = 0.0
-
-        # Classification logic:
-        # 1. ZUPT (Stationary): very low linear variance and low rotation
-        if lin_std < 0.25 and lin_mag.mean() < 0.45 and gyro_mag < 0.20:
-            if self.speed_kmh < 2.5:
-                self.speed_kmh = 0.0
-                return "STATIONARY", 98, turn_rate, tilt_rate_mag
-            else:
-                # Cruising smoothly on a road/highway
-                return "VEHICLE_DRIVING", 94, turn_rate, tilt_rate_mag
-
-        # 2. Hand Disturbance / In-Hand Gestures:
-        # If vehicle is stopped or moving very slowly (< 3.5 km/h) and user is violently shaking/flipping the phone
-        if self.speed_kmh < 3.5:
-            if gyro_mag > 1.2 or tilt_rate_mag > 1.0 or g_delta > 2.2:
-                conf = max(25, int(90 - tilt_rate_mag * 20 - g_delta * 10))
-                self.disturbance_cooldown = 10  # 1.0s cooldown
-                return "HAND_DISTURBANCE", conf, turn_rate, tilt_rate_mag
-        else:
-            # Vehicle is in motion (bike/car): bumps and turns are NORMAL driving kinematics!
-            # Only extreme tumble (phone dropped/spun) triggers disturbance
-            if gyro_mag > 3.0 or g_delta > 4.5:
-                self.disturbance_cooldown = 10
-                return "HAND_DISTURBANCE", 40, turn_rate, tilt_rate_mag
-
-        if self.disturbance_cooldown > 0:
-            self.disturbance_cooldown -= 1
-            if self.speed_kmh < 1.0:
-                return "STATIONARY", 80, turn_rate, tilt_rate_mag
-
-        # 3. Vehicle driving
-        conf = min(96, max(75, int(96 - lin_std * 3)))
-        return "VEHICLE_DRIVING", conf, turn_rate, tilt_rate_mag
 
     def _current_features(self):
         lin_x = np.array(self.buf_lin_x); lin_y = np.array(self.buf_lin_y); lin_z = np.array(self.buf_lin_z)
@@ -322,176 +262,171 @@ class OnlineFusionSession:
         ]).reshape(1, -1)
 
     def update(self, accel, gravity, gyro, gps=None, simulate_outage=False, dt=0.1):
-        """
-        Processes one sample (10Hz).
-        accel, gravity: {"x","y","z"} in m/s^2
-        gyro: {"yaw","pitch","roll"} in rad/s
-        gps: {"lat", "lon", optional "speed", optional "speed_kmh", optional "heading"} or None
-        simulate_outage: bool
-        dt: timestep (default 0.1s)
-        """
         self._push_imu(accel, gravity, gyro)
-        motion_state, conf, turn_rate, tilt_rate = self._analyze_motion()
-        self.motion_state = motion_state
-        self.confidence = conf
+        gps_ok = gps is not None and not simulate_outage
 
-        gps_ok = (gps is not None) and (not simulate_outage)
+        # Transform IMU readings to vehicle frame
+        ax_v, ay_v, az_v = phone_to_vehicle_frame(
+            accel["x"], accel["y"], accel["z"],
+            gravity["x"], gravity["y"], gravity["z"]
+        )
 
-        # -------------------------------------------------------------------
-        # GNSS ACTIVE MODE
-        # -------------------------------------------------------------------
         if gps_ok:
             if self.ref_frame is None:
                 self.ref_frame = LocalFrame(gps["lat"], gps["lon"])
-            x, y = self.ref_frame.to_xy(gps["lat"], gps["lon"])
+            
+            x_gps, y_gps = self.ref_frame.to_xy(gps["lat"], gps["lon"])
+            self.gps_track.append((x_gps, y_gps))
+            if len(self.gps_track) > self.LONG_WINDOW:
+                self.gps_track.pop(0)
 
-            # Check if this sample contains a genuinely new GPS fix from hardware
-            is_new_gps_fix = False
-            if self.last_gps_raw is None:
-                is_new_gps_fix = True
-            elif (abs(gps["lat"] - self.last_gps_raw["lat"]) > 1e-7 or
-                  abs(gps["lon"] - self.last_gps_raw["lon"]) > 1e-7):
-                is_new_gps_fix = True
+            # Compute GNSS velocity vector and course over ground if track history exists
+            gnss_vx, gnss_vy, gnss_heading = None, None, None
+            if len(self.gps_track) >= 2:
+                (x0, y0), (x1, y1) = self.gps_track[-2], self.gps_track[-1]
+                dx, dy = x1 - x0, y1 - y0
+                spd = math.hypot(dx, dy) / dt
+                if spd > 0.5:
+                    gnss_heading = math.atan2(dy, dx)
+                    gnss_vx = spd * math.cos(gnss_heading)
+                    gnss_vy = spd * math.sin(gnss_heading)
+                    self.last_confirmed_speed_ms = spd
+                    self.last_confirmed_heading = gnss_heading
 
-            # Determine GPS speed:
-            target_speed_kmh = None
+            self.last_confirmed_x = x_gps
+            self.last_confirmed_y = y_gps
 
-            # Priority 1: speed_kmh provided by frontend (computed from distinct GPS timestamps)
-            if gps.get("speed_kmh") is not None and not math.isnan(gps["speed_kmh"]):
-                target_speed_kmh = float(gps["speed_kmh"])
-            # Priority 2: Browser coords.speed (in m/s)
-            elif gps.get("speed") is not None and not math.isnan(gps["speed"]) and float(gps["speed"]) >= 0:
-                target_speed_kmh = float(gps["speed"]) * 3.6
-            # Priority 3: Derived from successive distinct GPS coordinates
-            elif is_new_gps_fix and self.last_gps_fix_xy is not None:
-                dx = x - self.last_gps_fix_xy[0]
-                dy = y - self.last_gps_fix_xy[1]
-                dist = math.hypot(dx, dy)
-                now = time.time()
-                dt_fix = now - self.last_gps_fix_time if self.last_gps_fix_time > 0 else 1.0
-                if 0.4 <= dt_fix <= 10.0:
-                    if dist > 1.2:
-                        target_speed_kmh = (dist / dt_fix) * 3.6
-                    else:
-                        target_speed_kmh = 0.0
+            if self.ekf is None:
+                init_h = gnss_heading if gnss_heading is not None else 0.0
+                init_vx = gnss_vx if gnss_vx is not None else 0.0
+                init_vy = gnss_vy if gnss_vy is not None else 0.0
+                self.ekf = ExtendedKalmanFilter(
+                    initial_x=x_gps, initial_y=y_gps,
+                    initial_vx=init_vx, initial_vy=init_vy,
+                    initial_heading=init_h
+                )
 
-            if is_new_gps_fix:
-                self.last_gps_raw = {"lat": gps["lat"], "lon": gps["lon"]}
-                self.last_gps_fix_xy = (x, y)
-                self.last_gps_fix_time = time.time()
-                self.gps_track.append((x, y))
-                if len(self.gps_track) > self.LONG_WINDOW:
-                    self.gps_track.pop(0)
+            # Check if recovering from DR outage -> perform smooth gradual alignment
+            if self.mode in ("DR", "TRANSITION"):
+                self.mode = "RECOVERING"
+            elif self.mode == "RECOVERING":
+                st = self.ekf.get_state()
+                err = math.hypot(st["x"] - x_gps, st["y"] - y_gps)
+                if err < 1.5:
+                    self.mode = "GNSS"
 
-            # Update speed:
-            if target_speed_kmh is not None:
-                target_speed_kmh = min(160.0, max(0.0, target_speed_kmh))
-                if target_speed_kmh < 0.8:
-                    target_speed_kmh = 0.0
-                if self.speed_kmh == 0.0:
-                    self.speed_kmh = target_speed_kmh
-                else:
-                    self.speed_kmh = 0.5 * self.speed_kmh + 0.5 * target_speed_kmh
-                self.last_gps_speed_kmh = self.speed_kmh
+            if self.mode == "RECOVERING":
+                st = self.ekf.get_state()
+                corr_x = x_gps - st["x"]
+                corr_y = y_gps - st["y"]
+                self.ekf.update_gnss(st["x"] + self.recovery_alpha * corr_x, st["y"] + self.recovery_alpha * corr_y, gnss_vx=gnss_vx, gnss_vy=gnss_vy, gnss_heading=gnss_heading)
             else:
-                # Same GPS fix held between 100ms sample ticks: MAINTAIN verified speed!
-                pass
+                self.mode = "GNSS"
+                self.ekf.update_gnss(x_gps, y_gps, gnss_vx=gnss_vx, gnss_vy=gnss_vy, gnss_heading=gnss_heading)
 
-            if self.speed_kmh >= 3.0:
-                self.motion_state = "VEHICLE_DRIVING"
-                self.confidence = max(self.confidence, 92)
-            elif self.speed_kmh == 0.0 and self.motion_state != "HAND_DISTURBANCE":
-                self.motion_state = "STATIONARY"
-
-            # Determine Heading
-            if gps.get("heading") is not None and not math.isnan(gps["heading"]):
-                self.dr_heading = math.radians(float(gps["heading"]))
-            elif len(self.gps_track) >= 2:
-                dx = self.gps_track[-1][0] - self.gps_track[0][0]
-                dy = self.gps_track[-1][1] - self.gps_track[0][1]
-                if math.hypot(dx, dy) > 1.5:  # require meaningful displacement
-                    self.dr_heading = math.atan2(dy, dx)
-
-            # Accumulate turn rates during GNSS to calibrate gyro bias
-            self.warmup_turn_rates.append(turn_rate)
-            if len(self.warmup_turn_rates) > 30:
-                self.warmup_turn_rates.pop(0)
-            if len(self.warmup_turn_rates) >= 10:
-                self.turn_bias = float(np.median(self.warmup_turn_rates))
-
-            self.dr_x, self.dr_y = x, y
-            self.mode = "GNSS"
+            # Predict EKF state
+            self.ekf.predict(ax_veh=ax_v, ay_veh=ay_v, gyro_yaw=gyro["yaw"], dt=dt)
+            st = self.ekf.get_state()
+            lat, lon = self.ref_frame.to_latlon(st["x"], st["y"])
+            conf = compute_confidence_score(self.mode, gps_accuracy=gps.get("accuracy", 5.0), speed_kmh=st["speed_kmh"], pos_uncertainty_m=st["pos_uncertainty_m"])
 
             return {
-                "mode": "GNSS",
-                "lat": gps["lat"],
-                "lon": gps["lon"],
-                "speed_kmh": round(self.speed_kmh, 1),
-                "heading_deg": round(math.degrees(self.dr_heading) % 360, 1),
-                "motion_state": self.motion_state,
-                "confidence": self.confidence,
+                "mode": self.mode,
+                "lat": round(lat, 7),
+                "lon": round(lon, 7),
+                "speed_kmh": round(st["speed_kmh"], 1),
+                "heading_deg": round(math.degrees(st["heading"]) % 360, 1),
+                "confidence": conf,
+                "pos_uncertainty_m": round(st["pos_uncertainty_m"], 2)
             }
 
-        # -------------------------------------------------------------------
-        # DEAD RECKONING MODE (GNSS OUTAGE / SIMULATED OUTAGE)
-        # -------------------------------------------------------------------
-        if self.mode == "GNSS":
-            # Seamless transition from GNSS to Dead Reckoning
+        # --- GNSS Outage / Dead Reckoning (DR) ---
+        if self.mode in ("GNSS", "RECOVERING"):
+            self.mode = "TRANSITION"
+            if len(self.gps_track) >= 5 and self.ref_frame is not None:
+                (x0, y0), (x1, y1) = self.gps_track[0], self.gps_track[-1]
+                gps_dist = math.hypot(x1 - x0, y1 - y0)
+                gps_dt = (len(self.gps_track) - 1) * dt
+                gps_speed_kmh = (gps_dist / gps_dt) * 3.6 if gps_dt > 0 else 0.0
+
+                if len(self.buf_lin_x) >= self.LONG_WINDOW:
+                    ai_pred = float(self.model.predict(self._current_features())[0])
+                    if ai_pred > 5.0 and gps_speed_kmh > 5.0:
+                        self.speed_scale = max(0.5, min(2.5, gps_speed_kmh / ai_pred))
+                    else:
+                        self.speed_scale = 1.0
+
+            # Re-align EKF velocity and heading to last confirmed GNSS state at transition entry
+            if self.ekf is not None:
+                init_vx = self.last_confirmed_speed_ms * math.cos(self.last_confirmed_heading)
+                init_vy = self.last_confirmed_speed_ms * math.sin(self.last_confirmed_heading)
+                self.ekf.x[0, 0] = self.last_confirmed_x
+                self.ekf.x[1, 0] = self.last_confirmed_y
+                self.ekf.x[2, 0] = init_vx
+                self.ekf.x[3, 0] = init_vy
+                self.ekf.x[4, 0] = self.last_confirmed_heading
+
+        self.mode = "DR"
+
+        if self.ekf is None:
             if self.ref_frame is None:
-                return {
-                    "mode": "NO_FIX", "lat": None, "lon": None, "speed_kmh": 0.0,
-                    "heading_deg": 0.0, "motion_state": self.motion_state, "confidence": 0
-                }
-            if self.dr_x is None:
-                self.dr_x = self.gps_track[-1][0] if self.gps_track else 0.0
-                self.dr_y = self.gps_track[-1][1] if self.gps_track else 0.0
-            # Start DR speed exactly at the last confirmed GPS speed
-            self.speed_kmh = self.last_gps_speed_kmh
-            self.mode = "DR"
+                return {"mode": "NO_FIX", "lat": None, "lon": None, "speed_kmh": None, "confidence": 0.0}
+            init_vx = self.last_confirmed_speed_ms * math.cos(self.last_confirmed_heading)
+            init_vy = self.last_confirmed_speed_ms * math.sin(self.last_confirmed_heading)
+            self.ekf = ExtendedKalmanFilter(
+                initial_x=self.last_confirmed_x, initial_y=self.last_confirmed_y,
+                initial_vx=init_vx, initial_vy=init_vy,
+                initial_heading=self.last_confirmed_heading
+            )
 
-        # Speed Estimation & Kinematic Filtering
-        if motion_state == "STATIONARY":
-            # Zero-Velocity Update (ZUPT): strictly zero
-            self.speed_kmh = 0.0
-        elif motion_state == "HAND_DISTURBANCE":
-            # Accidental hand movement / phone tilt: quarantine acceleration, decay speed
-            decay = math.exp(-dt / 0.8)
-            self.speed_kmh *= decay
-            if self.speed_kmh < 0.5:
-                self.speed_kmh = 0.0
+        # Forward acceleration filtering
+        a_forward = float(np.clip(ax_v, -3.0, 3.0))
+        if abs(a_forward) < 0.15:
+            a_forward = 0.0
+
+        # Predict forward with EKF
+        self.ekf.predict(ax_veh=a_forward, ay_veh=ay_v, gyro_yaw=gyro["yaw"], dt=dt)
+
+        # Predict speed via trained AI model & physics fusion
+        raw_speed = float(self.model.predict(self._current_features())[0]) if len(self.buf_lin_x) >= self.LONG_WINDOW else 0.0
+        v_ai_kmh = max(0.0, raw_speed * self.speed_scale) if len(self.buf_lin_x) >= self.LONG_WINDOW else self.last_confirmed_speed_ms * 3.6
+
+        last_spd_kmh = self.last_confirmed_speed_ms * 3.6
+        if v_ai_kmh < 5.0 and last_spd_kmh > 5.0 and a_forward >= -0.3:
+            v_eff_ai = last_spd_kmh
         else:
-            # VEHICLE_DRIVING: query the trained model
-            if len(self.buf_lin_x) >= self.LONG_WINDOW:
-                raw_pred = float(self.model.predict(self._current_features())[0])
-                target_speed = max(0.0, raw_pred)
-            else:
-                target_speed = self.speed_kmh
+            v_eff_ai = v_ai_kmh
 
-            # Enforce physical vehicle acceleration limits: max ~3.0 m/s^2 (~1.08 km/h per 100ms)
-            max_delta_kmh = 3.0 * 3.6 * dt
-            delta = target_speed - self.speed_kmh
-            delta = max(-max_delta_kmh * 2.0, min(max_delta_kmh, delta))
-            self.speed_kmh = max(0.0, self.speed_kmh + delta)
+        curr_speed_ms = float(math.hypot(self.ekf.x[2, 0], self.ekf.x[3, 0]))
+        delta_v_phys_kmh = float(np.clip(a_forward, -2.0, 2.0)) * dt * 3.6
+        candidate_kmh = curr_speed_ms * 3.6 + delta_v_phys_kmh
+        
+        target_kmh = 0.85 * v_eff_ai + 0.15 * candidate_kmh
+        target_kmh = float(np.clip(target_kmh, max(0.0, v_eff_ai - 15.0), v_eff_ai + 15.0))
 
-        # Dynamic Heading Update (Vehicle Turn Rate)
-        eff_turn_rate = turn_rate - self.turn_bias
-        if motion_state == "VEHICLE_DRIVING" and abs(eff_turn_rate) > 0.015:  # ~0.8 deg/s deadband
-            self.dr_heading += eff_turn_rate * dt
-            # Keep normalized in [-pi, pi]
-            self.dr_heading = (self.dr_heading + math.pi) % (2 * math.pi) - math.pi
+        fused_speed_ms = max(0.0, target_kmh / 3.6)
+        fused_speed_kmh = fused_speed_ms * 3.6
 
-        # Non-Holonomic Constraint (NHC): velocity advances strictly along heading
-        speed_ms = self.speed_kmh / 3.6
-        self.dr_x += speed_ms * math.cos(self.dr_heading) * dt
-        self.dr_y += speed_ms * math.sin(self.dr_heading) * dt
+        # Update EKF with AI predicted speed & NHC constraint
+        self.ekf.update_ai_motion(ai_speed_ms=fused_speed_ms)
 
-        lat, lon = self.ref_frame.to_latlon(self.dr_x, self.dr_y)
+        # Straight-road heading stabilization when turn rate is near zero
+        gyro_corr = gyro["yaw"] - float(self.ekf.x[5, 0])
+        if abs(gyro_corr) < 0.015:
+            h_err = math.atan2(math.sin(self.last_confirmed_heading - self.ekf.x[4, 0]), math.cos(self.last_confirmed_heading - self.ekf.x[4, 0]))
+            if abs(h_err) < 0.25: # within ~14 degrees of initial road course
+                self.ekf.x[4, 0] += 0.02 * h_err
+
+        st = self.ekf.get_state()
+        lat, lon = self.ref_frame.to_latlon(st["x"], st["y"])
+        conf = compute_confidence_score("DR", speed_kmh=fused_speed_kmh, pos_uncertainty_m=st["pos_uncertainty_m"])
+
         return {
             "mode": "DR",
-            "lat": lat,
-            "lon": lon,
-            "speed_kmh": round(self.speed_kmh, 1),
-            "heading_deg": round(math.degrees(self.dr_heading) % 360, 1),
-            "motion_state": self.motion_state,
-            "confidence": self.confidence,
+            "lat": round(lat, 7),
+            "lon": round(lon, 7),
+            "speed_kmh": round(fused_speed_kmh, 1),
+            "heading_deg": round(math.degrees(st["heading"]) % 360, 1),
+            "confidence": conf,
+            "pos_uncertainty_m": round(st["pos_uncertainty_m"], 2)
         }
