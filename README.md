@@ -1,54 +1,109 @@
-# TrueTrack — backend
+# S.A.F.A.R. (TrueTrack)
 
-AI-assisted dead reckoning for GNSS-denied vehicle navigation. FastAPI backend
-plus a small Leaflet frontend, with two demo modes:
+**AI-assisted Inertial Dead Reckoning for GNSS-denied vehicle navigation**
 
-- **Replay** — steps through a real, held-out IO-VNBD trip and compares ground
-  truth vs naive double-integration vs the AI-fused estimate.
-- **Live** — feeds real phone IMU/GPS samples from the browser through the same
-  fusion logic.
+Built for **Smart India Hackathon — Problem Statement ID 25168 (ISRO / Department of Space)**: *"AI/ML based intelligent Dead Reckoning mechanism for seamless navigation of a vehicle in a GNSS denied environment."*
+
+![S.A.F.A.R. app screenshot — live navigation view showing GNSS status, route, speed, and confidence](./app_screenshot.png)
 
 ---
 
-## Deploying to Render
+## Overview
 
-The repo is configured as a Render Blueprint. Two options:
+Vehicle navigation apps break down the moment GPS/GNSS signal is lost — inside tunnels, in dense urban canyons, under multi-level flyovers, or in valleys and forested terrain. **S.A.F.A.R.** (backend codename `TrueTrack`) keeps a vehicle's position estimate alive through exactly these blackouts by fusing:
 
-### Option A — Blueprint (recommended)
+- **Smartphone inertial sensors** — accelerometer, gyroscope, and gravity vector (no external hardware required), and
+- **A trained AI velocity model** that regresses vehicle speed from windowed IMU features (learned from real CAN-bus speedometer data), feeding
 
-1. Push this folder to the root of your GitHub repo.
-2. In Render: **New → Blueprint**, pick the repo. It reads `render.yaml`.
-3. Deploy. Health check is `GET /api/health`.
+into an **Extended Kalman Filter (EKF)** that continuously reconciles GNSS fixes (when available) with the inertial + AI-predicted motion estimate, and gracefully hands off between them.
 
-### Option B — manual Web Service
+The result is a position estimate that degrades gracefully — not catastrophically — when satellite lock is lost, and re-locks smoothly the moment GNSS returns.
 
-| Setting | Value |
-| --- | --- |
-| Runtime | Python 3 |
-| Build command | `pip install --upgrade pip && pip install -r requirements.txt` |
-| Start command | `uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1` |
-| Health check path | `/api/health` |
-| Env var | `PYTHON_VERSION` = `3.12.8` |
+## Why this approach
 
-Once live, the frontend is served at `/` and the API under `/api/...`.
+Naive dead reckoning (double-integrating raw accelerometer readings) drifts rapidly — errors compound quadratically with time and a stationary phone's own sensor bias alone can produce large position errors within a minute. S.A.F.A.R. instead:
 
----
+1. Learns vehicle speed directly from phone motion patterns using a model trained on **real vehicle trips (IO-VNBD dataset)**, correlating smartphone IMU signatures with the vehicle's actual CAN-bus/OBD-II speedometer reading — at inference time, **only the phone's own sensors are used**, never the vehicle bus.
+2. Feeds that AI speed estimate into an EKF alongside gyroscope heading and (when present) GNSS position/velocity, rather than trusting raw integration alone.
+3. Explicitly models the transition between navigation states, rather than treating "GNSS available" and "GNSS lost" as a hard switch.
 
-## Two things that will break the deploy if you change them
+## How it works
 
-**1. Do not downgrade `numpy` or `scikit-learn`.**
-`app/trained_model.joblib` was pickled with scikit-learn 1.8.x on numpy 2.x.
-Installing numpy 1.x raises `ModuleNotFoundError: No module named 'numpy._core'`
-at the first prediction; scikit-learn < 1.7 fails to reconstruct the
-`HistGradientBoostingRegressor`. `requirements.txt` has floors that prevent both.
+### Navigation state machine
 
-**2. Keep `--workers 1`.**
-Replay and live sessions live in per-process dictionaries. A second worker
-would return `404 Unknown session` for roughly half of all requests.
+The fusion engine moves through explicit states rather than a binary GPS-on/GPS-off flag:
 
----
+```
+GNSS_LOCKED → GNSS_WEAK → TRANSITION → GNSS_DENIED → RECOVERING → RELOCKED
+```
 
-## Running locally
+This avoids the two failure modes of a hard switch: a sudden position jump when GNSS is regained after a long outage, and full trust in a single noisy GPS fix right at the edge of signal loss.
+
+### Sensor fusion pipeline
+
+| Stage | What it does |
+|---|---|
+| **Frame transform** | Rotates raw phone-frame acceleration into a vehicle-aligned frame (forward / lateral / vertical) using the live gravity vector, so orientation of the phone in the vehicle doesn't matter. |
+| **AI velocity model** | A `HistGradientBoostingRegressor` (scikit-learn) predicts vehicle speed from a sliding window of accelerometer, gravity, and gyroscope features — trained to reproduce the real speedometer reading without ever seeing it at inference time. |
+| **Extended Kalman Filter** | An 8-state EKF (`position × 2, velocity × 2, heading, gyro bias, accel bias × 2`) fuses the AI speed estimate, gyroscope heading, and GNSS fixes (position + Doppler speed) when available, tracking its own uncertainty throughout. |
+| **Confidence scoring** | A continuous 0–100% confidence score is derived from GNSS accuracy, filter covariance, motion state, and time-since-last-fix, and shown live to the driver. |
+
+### Two operating modes
+
+- **Replay mode** — steps through a real, held-out trip from the IO-VNBD dataset with a simulated GNSS blackout, plotting ground truth vs. naive double-integration vs. the AI-fused estimate side by side. Lets the system be demoed and evaluated indoors, without a moving vehicle — as suggested by the problem statement itself.
+- **Live mode** — takes real accelerometer / gyroscope / gravity / GPS samples from a phone's browser (via the Web Motion and Geolocation APIs) and fuses them in real time, with an operator-toggleable simulated GNSS outage for live demonstration.
+
+## Screenshot walkthrough
+
+The screenshot above shows the live navigation view:
+
+- **GNSS ACTIVE** badge — current lock state from the navigation state machine.
+- **Route line** — planned route to the searched destination, with the live position marker at the vehicle's current fused location.
+- **Speed** — current speed in km/h, from GNSS Doppler when locked or the AI velocity model when GNSS-denied.
+- **Confidence bar** — the live 0–100% fusion confidence score.
+- **Status strip** — filter status, current position uncertainty (± meters), and heading, all sourced from the EKF state and covariance.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Backend | Python, [FastAPI](https://fastapi.tiangolo.com/), Uvicorn |
+| Sensor fusion | NumPy, hand-rolled Extended Kalman Filter |
+| AI model | scikit-learn `HistGradientBoostingRegressor`, joblib |
+| Data processing | pandas |
+| Frontend | HTML / CSS / vanilla JS, [Leaflet](https://leafletjs.com/) for mapping |
+| Training data | [IO-VNBD](https://github.com) — synchronised smartphone-IMU + vehicle-CAN-bus driving trips |
+| Deployment | Render (Blueprint / `render.yaml`), Python 3.12 |
+
+## Project structure
+
+```
+app/                    FastAPI application, fusion engine, trained model
+  main.py               API routes (health, replay, live sessions)
+  fusion.py             Frame transforms, confidence scoring, AI-fused dead reckoning
+  ekf.py                Extended Kalman Filter implementation
+  data_utils.py          IO-VNBD loading + windowed feature engineering
+  geo.py                Local ENU (meters) <-> lat/lon projection
+  model.py              Lazy, thread-safe loader for the trained model
+  replay.py             Precomputed ground-truth / naive / AI-fused trajectories for demo trips
+  replay_data/          Bundled demo trip CSVs (required at runtime)
+  trained_model.joblib  Trained AI velocity model
+static/                 Leaflet-based frontend (index.html, app.js, style.css)
+train_model.py          Retrains the AI velocity model from IO-VNBD trips
+offline_eval.py         Batch evaluation of blackout drift -> drift_comparison.png
+requirements.txt        Production dependencies
+requirements-dev.txt    Additional dependencies for training/evaluation
+render.yaml / Procfile  Render deployment configuration
+```
+
+## Getting started
+
+### Prerequisites
+
+- Python 3.12
+- pip
+
+### Local setup
 
 ```bash
 python -m venv .venv
@@ -57,81 +112,53 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-Open <http://localhost:8000/>.
+Then open **http://localhost:8000/**.
 
-Live mode uses the browser's motion and geolocation APIs, which browsers only
-expose over HTTPS or on `localhost` — it works on Render (HTTPS) and on
-localhost, but not over plain HTTP on a LAN IP.
+> **Note:** Live mode reads the phone's motion and geolocation sensors through the browser, which browsers only expose over HTTPS or on `localhost` — it will not work over plain HTTP on a LAN IP.
 
-For the training/eval scripts, install the extras too:
+### Training / evaluation (optional)
 
 ```bash
 pip install -r requirements-dev.txt
-python train_model.py     # rewrites app/trained_model.joblib
-python offline_eval.py    # writes drift_comparison.png
+python train_model.py     # retrains and overwrites app/trained_model.joblib
+python offline_eval.py    # produces drift_comparison.png
 ```
 
-If you retrain, commit the regenerated `app/trained_model.joblib` and make sure
-the versions in `requirements.txt` still match what you trained with.
+If you retrain the model, commit the regenerated `app/trained_model.joblib`, and make sure the pinned `numpy` / `scikit-learn` versions in `requirements.txt` still match the versions used for training.
 
----
+## API reference
 
-## API
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Liveness probe |
+| `GET` | `/api/replay/trips` | List bundled demo trips |
+| `POST` | `/api/replay/{trip_id}/start` | Start a replay session |
+| `POST` | `/api/replay/session/{sid}/next` | Advance the replay by one 100 ms step |
+| `POST` | `/api/live/session/start` | Start a live sensor-fusion session |
+| `POST` | `/api/live/session/{sid}/sample` | Submit one live IMU(+GPS) sample, receive the fused position |
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/api/health` | liveness probe |
-| GET | `/api/replay/trips` | list bundled demo trips |
-| POST | `/api/replay/{trip_id}/start` | open a replay session |
-| POST | `/api/replay/session/{sid}/next` | advance one 100 ms step |
-| POST | `/api/live/session/start` | open a live sensor session |
-| POST | `/api/live/session/{sid}/sample` | submit one IMU(+GPS) sample |
+## Deployment
 
----
+The repository is pre-configured as a **Render Blueprint**:
 
-## Layout
+1. Push this folder to the root of a GitHub repository.
+2. In Render: **New → Blueprint**, and select the repository — it reads `render.yaml` automatically.
+3. Deploy. Health checks run against `GET /api/health`.
 
-```
-app/                  FastAPI app, fusion engine, trained model
-  main.py             routes
-  fusion.py           naive DR, AI-fused DR, OnlineFusionSession
-  data_utils.py       IO-VNBD loading + feature engineering
-  geo.py              local ENU frame
-  model.py            lazy model loader
-  replay_data/        bundled demo trip CSVs (required at runtime)
-  trained_model.joblib
-static/               Leaflet frontend
-training_data/        raw IO-VNBD trips (training only, ~70 MB, not used at runtime)
-train_model.py        retrains the velocity model
-offline_eval.py       blackout drift evaluation -> drift_comparison.png
-```
+Once live, the frontend is served at `/` and the API under `/api/...`.
 
-`training_data/` is only read by `train_model.py` and `offline_eval.py`. If you
-want faster clones and builds you can move it out of the repo entirely; the
-deployed service does not touch it.
+**Two constraints that must be preserved:**
 
----
+- **Do not downgrade `numpy` or `scikit-learn`** below the versions pinned in `requirements.txt` — the committed model was trained on `numpy 2.x` / `scikit-learn 1.8.x`, and older versions cannot unpickle it.
+- **Keep `--workers 1`.** Replay and live sessions are held in per-process memory; a second worker would return `404` for roughly half of all requests.
 
-## What was changed to make this deployable
+## Roadmap
 
-- **`requirements.txt`** — `numpy==1.26.4` and `scikit-learn==1.5.1` were
-  incompatible with the committed model (trained on numpy 2.x / sklearn 1.8.x).
-  Replaced exact pins with correct bounded ranges. This was the actual deploy
-  breaker.
-- **`runtime.txt`** — had no trailing newline, so the version string could be
-  misparsed and the build would fall back to a newer Python with no wheels for
-  the pinned numpy. Fixed, and added `.python-version` (Render's current
-  mechanism) pinning 3.12.8.
-- **`render.yaml`** — `env: python` is deprecated, replaced with
-  `runtime: python`; added `healthCheckPath`, `PYTHON_VERSION`, and explicit
-  `--workers 1`.
-- **`app/model.py`** — load is lazy and thread-safe so the process binds `$PORT`
-  immediately; dependency-mismatch and missing-file cases now raise readable
-  errors instead of an opaque stack trace.
-- **`app/main.py`** — `.dict()` → `.model_dump()` (removed in pydantic v3);
-  model/data failures return `503` with a real message instead of `500`; static
-  mount guarded; added a `favicon.ico` handler.
-- **`app/replay.py`** — explicit check that the bundled replay CSVs are present.
-- **`.gitignore`** added; committed `__pycache__/*.pyc` removed (they were built
-  for Python 3.13 and are stale against the pinned 3.12).
-- **`requirements-dev.txt`** — moved `matplotlib` out of the production install.
+- Package the web app as a native mobile app via [Capacitor](https://capacitorjs.com/) for on-device sensor access without a browser.
+- Expand the AI velocity model's training set beyond the current held-out IO-VNBD trips.
+- Add persistent session storage to support horizontal scaling beyond a single worker.
+
+## Acknowledgements
+
+- **IO-VNBD** dataset for synchronised smartphone-IMU and vehicle-CAN-bus driving trips used for training and evaluation.
+- Built in response to **ISRO / Department of Space**, Smart India Hackathon **Problem Statement ID 25168**.
