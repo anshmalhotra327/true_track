@@ -218,6 +218,21 @@ class OnlineFusionSession:
     LONG_WINDOW = 30
     SHORT_WINDOW = 10
 
+    # --- Stationary / zero-velocity detection thresholds ---
+    # Linear (gravity-removed) accel magnitude typically stays under ~0.3-0.4 m/s^2
+    # for hand jitter / a phone sitting still, vs clearly higher during any real
+    # driving acceleration/braking/turning. Tune these two if the demo phone is
+    # unusually shaky or unusually smooth.
+    STATIONARY_ACCEL_MEAN_THRESH = 0.35   # m/s^2
+    STATIONARY_ACCEL_STD_THRESH = 0.35    # m/s^2
+    STATIONARY_GYRO_THRESH = 0.12         # rad/s (~7 deg/s)
+    STATIONARY_GPS_SPEED_KMH = 2.0        # only used to corroborate IMU stillness while GNSS is locked
+
+    # GPS fix quality gates
+    MAX_TRUSTED_ACCURACY_M = 30.0         # beyond this, treat position/velocity updates as low-confidence
+    MIN_FIX_DT_S = 0.25                   # guard against divide-by-tiny-dt on back-to-back fixes
+    MAX_FIX_DT_S = 8.0                    # guard against huge dt after a long gap (treat as a fresh start instead)
+
     def __init__(self, model_bundle):
         self.model = model_bundle["model"]
         self.buf_lin_x, self.buf_lin_y, self.buf_lin_z = [], [], []
@@ -234,6 +249,12 @@ class OnlineFusionSession:
         self.last_confirmed_y = 0.0
         self.gyro_bias = 0.0
         self.recovery_alpha = 0.15  # Exponential recovery smoothing factor
+        self.smoothed_speed_kmh = 0.0
+
+        # Real GPS fix bookkeeping (used instead of assuming every 100ms tick is a new fix)
+        self.last_gps_lat = None
+        self.last_gps_lon = None
+        self.last_gps_fix_time_ms = None
 
     def _push_imu(self, accel, gravity, gyro):
         self.buf_lin_x.append(accel["x"] - gravity["x"])
@@ -261,6 +282,38 @@ class OnlineFusionSession:
             np.abs(gyaw[-l:]).mean(), gyaw[-l:].std(),
         ]).reshape(1, -1)
 
+    def _is_stationary(self):
+        """
+        IMU-only zero-velocity check: true when recent linear acceleration and
+        gyro rate both look like 'sitting still / being held', not driving.
+        Requires no GPS, so this is what actually catches 'holding the phone,
+        not driving, GNSS forced off' -- the AI model and pure physics
+        integration both drift on pure noise once you're a few seconds into an
+        outage, so this acts as a hard floor.
+        """
+        if len(self.buf_lin_x) < self.SHORT_WINDOW:
+            return False
+        s = self.SHORT_WINDOW
+        lin_x = np.array(self.buf_lin_x[-s:])
+        lin_y = np.array(self.buf_lin_y[-s:])
+        lin_z = np.array(self.buf_lin_z[-s:])
+        gyaw = np.array(self.buf_gyro_yaw[-s:])
+        accel_mag = np.sqrt(lin_x ** 2 + lin_y ** 2 + lin_z ** 2)
+        accel_ok = (accel_mag.mean() < self.STATIONARY_ACCEL_MEAN_THRESH and
+                    accel_mag.std() < self.STATIONARY_ACCEL_STD_THRESH)
+        gyro_ok = float(np.abs(gyaw).mean()) < self.STATIONARY_GYRO_THRESH
+        return bool(accel_ok and gyro_ok)
+
+    @staticmethod
+    def _filter_forward_accel(a_forward, deadzone=0.6, clip=3.0):
+        """Shared accel conditioning used in BOTH the GNSS and DR branches.
+        Previously only the DR branch clipped/deadzoned this, so hand-shake
+        noise fed straight into the EKF predict step whenever GNSS was locked."""
+        a_forward = float(np.clip(a_forward, -clip, clip))
+        if abs(a_forward) < deadzone:
+            a_forward = 0.0
+        return a_forward
+
     def update(self, accel, gravity, gyro, gps=None, simulate_outage=False, dt=0.1):
         self._push_imu(accel, gravity, gyro)
         gps_ok = gps is not None and not simulate_outage
@@ -274,24 +327,76 @@ class OnlineFusionSession:
         if gps_ok:
             if self.ref_frame is None:
                 self.ref_frame = LocalFrame(gps["lat"], gps["lon"])
-            
-            x_gps, y_gps = self.ref_frame.to_xy(gps["lat"], gps["lon"])
-            self.gps_track.append((x_gps, y_gps))
-            if len(self.gps_track) > self.LONG_WINDOW:
-                self.gps_track.pop(0)
 
-            # Compute GNSS velocity vector and course over ground if track history exists
+            x_gps, y_gps = self.ref_frame.to_xy(gps["lat"], gps["lon"])
+            accuracy_m = gps.get("accuracy")
+            if accuracy_m is None:
+                accuracy_m = 5.0
+            native_speed_ms = gps.get("speed")  # browser's own Doppler-derived speed, if it gave one
+            fix_time_ms = gps.get("fix_time_ms")
+
+            # Is this a genuinely NEW GPS fix, or the same cached fix being resent on
+            # another 100ms IMU tick because the GPS chip itself updates far slower
+            # than the IMU loop? Previously every tick was treated as a fresh fix and
+            # differenced against the last one using an assumed 0.1s, which turned a
+            # couple of meters of ordinary GPS jitter into 10-30 km/h of phantom speed.
+            is_new_fix = (
+                self.last_gps_lat is None or self.last_gps_lon is None or
+                gps["lat"] != self.last_gps_lat or gps["lon"] != self.last_gps_lon or
+                fix_time_ms is None or self.last_gps_fix_time_ms is None or
+                fix_time_ms != self.last_gps_fix_time_ms
+            )
+
             gnss_vx, gnss_vy, gnss_heading = None, None, None
-            if len(self.gps_track) >= 2:
-                (x0, y0), (x1, y1) = self.gps_track[-2], self.gps_track[-1]
-                dx, dy = x1 - x0, y1 - y0
-                spd = math.hypot(dx, dy) / dt
-                if spd > 0.5:
-                    gnss_heading = math.atan2(dy, dx)
-                    gnss_vx = spd * math.cos(gnss_heading)
-                    gnss_vy = spd * math.sin(gnss_heading)
-                    self.last_confirmed_speed_ms = spd
-                    self.last_confirmed_heading = gnss_heading
+            trusted_accuracy = accuracy_m <= self.MAX_TRUSTED_ACCURACY_M
+
+            if is_new_fix:
+                self.gps_track.append((x_gps, y_gps, fix_time_ms))
+                if len(self.gps_track) > self.LONG_WINDOW:
+                    self.gps_track.pop(0)
+
+                real_dt = None
+                if fix_time_ms is not None and self.last_gps_fix_time_ms is not None:
+                    real_dt = (fix_time_ms - self.last_gps_fix_time_ms) / 1000.0
+
+                if native_speed_ms is not None and native_speed_ms >= 0:
+                    # Prefer the GPS chip's own Doppler speed: it measures velocity
+                    # directly from frequency shift and is far less sensitive to a
+                    # few meters of position jitter than differencing two fixes.
+                    spd = float(native_speed_ms)
+                    if len(self.gps_track) >= 2 and spd > 0.3:
+                        (x0, y0, _), (x1, y1, _) = self.gps_track[-2], self.gps_track[-1]
+                        gnss_heading = math.atan2(y1 - y0, x1 - x0)
+                elif (trusted_accuracy and len(self.gps_track) >= 2 and
+                      real_dt is not None and self.MIN_FIX_DT_S <= real_dt <= self.MAX_FIX_DT_S):
+                    (x0, y0, _), (x1, y1, _) = self.gps_track[-2], self.gps_track[-1]
+                    dx, dy = x1 - x0, y1 - y0
+                    disp = math.hypot(dx, dy)
+                    # Only trust the displacement as real motion (not GPS noise) once
+                    # it clearly exceeds the fix's own accuracy radius.
+                    if disp > max(2.0, accuracy_m * 1.5):
+                        spd = disp / real_dt
+                        gnss_heading = math.atan2(dy, dx)
+                    else:
+                        spd = 0.0
+                else:
+                    spd = None
+
+                if spd is not None and spd > 0.3:
+                    if gnss_heading is None and len(self.gps_track) >= 2:
+                        (x0, y0, _), (x1, y1, _) = self.gps_track[-2], self.gps_track[-1]
+                        gnss_heading = math.atan2(y1 - y0, x1 - x0)
+                    if gnss_heading is not None:
+                        gnss_vx = spd * math.cos(gnss_heading)
+                        gnss_vy = spd * math.sin(gnss_heading)
+                        self.last_confirmed_speed_ms = spd
+                        self.last_confirmed_heading = gnss_heading
+                elif spd is not None:
+                    self.last_confirmed_speed_ms = 0.0
+
+                self.last_gps_lat, self.last_gps_lon = gps["lat"], gps["lon"]
+                if fix_time_ms is not None:
+                    self.last_gps_fix_time_ms = fix_time_ms
 
             self.last_confirmed_x = x_gps
             self.last_confirmed_y = y_gps
@@ -315,26 +420,49 @@ class OnlineFusionSession:
                 if err < 1.5:
                     self.mode = "GNSS"
 
+            # Scale GNSS measurement noise by reported accuracy: a coarse fix should
+            # correct the filter gently, not yank it around.
+            r_pos = max(0.5, (accuracy_m / 3.0) ** 2)
+            R_gnss = np.diag([r_pos, r_pos])
+
             if self.mode == "RECOVERING":
                 st = self.ekf.get_state()
                 corr_x = x_gps - st["x"]
                 corr_y = y_gps - st["y"]
-                self.ekf.update_gnss(st["x"] + self.recovery_alpha * corr_x, st["y"] + self.recovery_alpha * corr_y, gnss_vx=gnss_vx, gnss_vy=gnss_vy, gnss_heading=gnss_heading)
+                self.ekf.update_gnss(st["x"] + self.recovery_alpha * corr_x, st["y"] + self.recovery_alpha * corr_y, gnss_vx=gnss_vx, gnss_vy=gnss_vy, gnss_heading=gnss_heading, R_gnss=R_gnss)
             else:
                 self.mode = "GNSS"
-                self.ekf.update_gnss(x_gps, y_gps, gnss_vx=gnss_vx, gnss_vy=gnss_vy, gnss_heading=gnss_heading)
+                self.ekf.update_gnss(x_gps, y_gps, gnss_vx=gnss_vx, gnss_vy=gnss_vy, gnss_heading=gnss_heading, R_gnss=R_gnss)
 
-            # Predict EKF state
-            self.ekf.predict(ax_veh=ax_v, ay_veh=ay_v, gyro_yaw=gyro["yaw"], dt=dt)
+            # Predict EKF state -- filter the accel the same way the DR branch does,
+            # so phone hand-shake doesn't inject spurious velocity between fixes.
+            a_forward = self._filter_forward_accel(ax_v)
+            self.ekf.predict(ax_veh=a_forward, ay_veh=ay_v, gyro_yaw=gyro["yaw"], dt=dt)
             st = self.ekf.get_state()
+
+            is_stationary = self._is_stationary()
+            speed_kmh = st["speed_kmh"]
+            # last_confirmed_speed_ms only gets bumped above ~1 m/s when a GPS fix
+            # (native Doppler speed, or a displacement clearly bigger than the fix's
+            # own accuracy radius) actually confirmed real motion -- so if it's near
+            # zero, GPS agrees nothing is happening and IMU stillness can be trusted
+            # to override any jitter that leaked into the EKF's velocity. If GPS
+            # HAS recently confirmed real motion (e.g. smooth constant-speed
+            # cruising, where accel is legitimately near zero too), don't stomp it.
+            if is_stationary and self.last_confirmed_speed_ms < 1.0:
+                speed_kmh = 0.0
+                self.ekf.x[2, 0] = 0.0
+                self.ekf.x[3, 0] = 0.0
+                self.last_confirmed_speed_ms = 0.0
+
             lat, lon = self.ref_frame.to_latlon(st["x"], st["y"])
-            conf = compute_confidence_score(self.mode, gps_accuracy=gps.get("accuracy", 5.0), speed_kmh=st["speed_kmh"], pos_uncertainty_m=st["pos_uncertainty_m"])
+            conf = compute_confidence_score(self.mode, gps_accuracy=accuracy_m, speed_kmh=speed_kmh, pos_uncertainty_m=st["pos_uncertainty_m"], is_stationary=is_stationary)
 
             return {
                 "mode": self.mode,
                 "lat": round(lat, 7),
                 "lon": round(lon, 7),
-                "speed_kmh": round(st["speed_kmh"], 1),
+                "speed_kmh": round(speed_kmh, 1),
                 "heading_deg": round(math.degrees(st["heading"]) % 360, 1),
                 "confidence": conf,
                 "pos_uncertainty_m": round(st["pos_uncertainty_m"], 2)
@@ -344,10 +472,15 @@ class OnlineFusionSession:
         if self.mode in ("GNSS", "RECOVERING"):
             self.mode = "TRANSITION"
             if len(self.gps_track) >= 5 and self.ref_frame is not None:
-                (x0, y0), (x1, y1) = self.gps_track[0], self.gps_track[-1]
+                (x0, y0, t0), (x1, y1, t1) = self.gps_track[0], self.gps_track[-1]
                 gps_dist = math.hypot(x1 - x0, y1 - y0)
-                gps_dt = (len(self.gps_track) - 1) * dt
-                gps_speed_kmh = (gps_dist / gps_dt) * 3.6 if gps_dt > 0 else 0.0
+                if t0 is not None and t1 is not None and t1 > t0:
+                    gps_dt = (t1 - t0) / 1000.0
+                else:
+                    # No fix timestamps available (older client) -- fall back to the
+                    # last known confirmed speed rather than guessing a timestep.
+                    gps_dt = None
+                gps_speed_kmh = (gps_dist / gps_dt) * 3.6 if gps_dt and gps_dt > 0 else self.last_confirmed_speed_ms * 3.6
 
                 if len(self.buf_lin_x) >= self.LONG_WINDOW:
                     ai_pred = float(self.model.predict(self._current_features())[0])
@@ -379,43 +512,57 @@ class OnlineFusionSession:
                 initial_heading=self.last_confirmed_heading
             )
 
-        # Forward acceleration filtering
-        a_forward = float(np.clip(ax_v, -3.0, 3.0))
-        if abs(a_forward) < 0.6:  # Increased threshold to ignore small hand movements
-            a_forward = 0.0
+        # Forward acceleration filtering (shared with the GNSS branch)
+        a_forward = self._filter_forward_accel(ax_v)
 
         # Predict forward with EKF
         self.ekf.predict(ax_veh=a_forward, ay_veh=ay_v, gyro_yaw=gyro["yaw"], dt=dt)
 
-        # Predict speed via trained AI model & physics fusion
-        raw_speed = float(self.model.predict(self._current_features())[0]) if len(self.buf_lin_x) >= self.LONG_WINDOW else 0.0
-        v_ai_kmh = max(0.0, raw_speed * self.speed_scale) if len(self.buf_lin_x) >= self.LONG_WINDOW else self.last_confirmed_speed_ms * 3.6
+        is_stationary = self._is_stationary()
 
-        last_spd_kmh = self.last_confirmed_speed_ms * 3.6
-        curr_speed_ms = float(math.hypot(self.ekf.x[2, 0], self.ekf.x[3, 0]))
-        curr_speed_kmh = curr_speed_ms * 3.6
-
-        # Anti-flicker logic: if we were mostly stationary, ignore random AI speed spikes from hand motion
-        # Make the condition much stricter to prevent 20-30kmph jumps
-        if last_spd_kmh < 3.0 and curr_speed_kmh < 10.0 and abs(a_forward) < 2.0:
+        if is_stationary:
+            # No GPS to lean on during an outage, so IMU stillness is the primary
+            # signal here: gyro + linear accel both near zero for a sustained window
+            # means the phone is being held / sitting still, not driving. This is
+            # exactly the "force GNSS outage while not actually moving" case that
+            # was previously showing 40-50 km/h carried over from noisy GNSS-mode
+            # speed estimates.
             v_eff_ai = 0.0
             candidate_kmh = 0.0
+            target_kmh = 0.0
+            self.smoothed_speed_kmh = max(0.0, self.smoothed_speed_kmh * 0.5)
+            if self.smoothed_speed_kmh < 0.5:
+                self.smoothed_speed_kmh = 0.0
+            self.ekf.x[2, 0] *= 0.5
+            self.ekf.x[3, 0] *= 0.5
         else:
-            if v_ai_kmh < 5.0 and last_spd_kmh > 5.0 and a_forward >= -0.3:
-                v_eff_ai = last_spd_kmh
+            # Predict speed via trained AI model & physics fusion
+            raw_speed = float(self.model.predict(self._current_features())[0]) if len(self.buf_lin_x) >= self.LONG_WINDOW else 0.0
+            v_ai_kmh = max(0.0, raw_speed * self.speed_scale) if len(self.buf_lin_x) >= self.LONG_WINDOW else self.last_confirmed_speed_ms * 3.6
+
+            last_spd_kmh = self.last_confirmed_speed_ms * 3.6
+            curr_speed_ms = float(math.hypot(self.ekf.x[2, 0], self.ekf.x[3, 0]))
+            curr_speed_kmh = curr_speed_ms * 3.6
+
+            # Anti-flicker logic: if we were mostly stationary, ignore random AI speed spikes from hand motion
+            # Make the condition much stricter to prevent 20-30kmph jumps
+            if last_spd_kmh < 3.0 and curr_speed_kmh < 10.0 and abs(a_forward) < 2.0:
+                v_eff_ai = 0.0
+                candidate_kmh = 0.0
             else:
-                v_eff_ai = v_ai_kmh
+                if v_ai_kmh < 5.0 and last_spd_kmh > 5.0 and a_forward >= -0.3:
+                    v_eff_ai = last_spd_kmh
+                else:
+                    v_eff_ai = v_ai_kmh
 
-            delta_v_phys_kmh = float(np.clip(a_forward, -2.0, 2.0)) * dt * 3.6
-            candidate_kmh = curr_speed_kmh + delta_v_phys_kmh
+                delta_v_phys_kmh = float(np.clip(a_forward, -2.0, 2.0)) * dt * 3.6
+                candidate_kmh = curr_speed_kmh + delta_v_phys_kmh
 
-        target_kmh = 0.85 * v_eff_ai + 0.15 * candidate_kmh
-        target_kmh = float(np.clip(target_kmh, max(0.0, v_eff_ai - 15.0), v_eff_ai + 15.0))
-        
-        # Exponential smoothing to prevent rapid jumps
-        if not hasattr(self, 'smoothed_speed_kmh'):
-            self.smoothed_speed_kmh = target_kmh
-        self.smoothed_speed_kmh = 0.7 * self.smoothed_speed_kmh + 0.3 * target_kmh
+            target_kmh = 0.85 * v_eff_ai + 0.15 * candidate_kmh
+            target_kmh = float(np.clip(target_kmh, max(0.0, v_eff_ai - 15.0), v_eff_ai + 15.0))
+
+            # Exponential smoothing to prevent rapid jumps
+            self.smoothed_speed_kmh = 0.7 * self.smoothed_speed_kmh + 0.3 * target_kmh
 
         fused_speed_ms = max(0.0, self.smoothed_speed_kmh / 3.6)
         fused_speed_kmh = fused_speed_ms * 3.6
@@ -432,7 +579,7 @@ class OnlineFusionSession:
 
         st = self.ekf.get_state()
         lat, lon = self.ref_frame.to_latlon(st["x"], st["y"])
-        conf = compute_confidence_score("DR", speed_kmh=fused_speed_kmh, pos_uncertainty_m=st["pos_uncertainty_m"])
+        conf = compute_confidence_score("DR", speed_kmh=fused_speed_kmh, pos_uncertainty_m=st["pos_uncertainty_m"], is_stationary=is_stationary)
 
         return {
             "mode": "DR",

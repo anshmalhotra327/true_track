@@ -152,6 +152,9 @@ class Gyro(BaseModel):
 class GpsFix(BaseModel):
     lat: float
     lon: float
+    accuracy: Optional[float] = None     # meters, reported GPS accuracy (radius)
+    speed: Optional[float] = None        # m/s, native Doppler-derived GPS speed (None if browser doesn't report one)
+    fix_time_ms: Optional[float] = None  # epoch ms when THIS fix was captured by the browser (not when the sample was sent)
 
 
 class LiveSample(BaseModel):
@@ -169,7 +172,15 @@ def live_sample(sid: str, sample: LiveSample):
     if sess is None:
         raise HTTPException(404, "Unknown session -- call /api/live/session/start first")
 
-    gps = {"lat": sample.gps.lat, "lon": sample.gps.lon} if sample.gps else None
+    gps = None
+    if sample.gps:
+        gps = {
+            "lat": sample.gps.lat,
+            "lon": sample.gps.lon,
+            "accuracy": sample.gps.accuracy,
+            "speed": sample.gps.speed,
+            "fix_time_ms": sample.gps.fix_time_ms,
+        }
     result = sess.update(
         accel=sample.accel.model_dump(), gravity=sample.gravity.model_dump(),
         gyro=sample.gyro.model_dump(), gps=gps,

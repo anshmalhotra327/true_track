@@ -295,7 +295,19 @@ function onDeviceMotion(e) {
 function onGeoSuccess(pos) {
   const acc = pos.coords.accuracy;
   if (acc != null && acc > MAX_ACCEPTABLE_ACCURACY_M) return;
-  latestGps = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: acc };
+  latestGps = {
+    lat: pos.coords.latitude,
+    lon: pos.coords.longitude,
+    accuracy: acc,
+    // Native Doppler-derived speed from the GPS chip (m/s), when the browser
+    // provides one -- far more accurate at low speeds than differencing two
+    // fixes, since it isn't thrown off by a couple meters of position jitter.
+    speed: (pos.coords.speed != null && pos.coords.speed >= 0) ? pos.coords.speed : null,
+    // When THIS fix was actually captured, not when we last polled it -- the
+    // backend needs this to know the real time between fixes instead of
+    // assuming a new one arrives every 100ms tick.
+    fixTimeMs: pos.timestamp || Date.now(),
+  };
   lastFixTime = Date.now();
   
   if (!haveEverFixed) {
@@ -365,7 +377,11 @@ document.getElementById('btn-start-live').onclick = async () => {
 
     const body = {
       accel: latestAccel, gravity: latestGravityEst, gyro: latestGyro,
-      gps: useGps ? { lat: latestGps.lat, lon: latestGps.lon } : null,
+      gps: useGps ? {
+        lat: latestGps.lat, lon: latestGps.lon,
+        accuracy: latestGps.accuracy, speed: latestGps.speed,
+        fix_time_ms: latestGps.fixTimeMs,
+      } : null,
       simulate_outage: manualOutage || signalStale || !haveEverFixed,
       dt: 0.1,
     };
