@@ -128,6 +128,22 @@ sheetHandle.onclick = () => {
   bottomSheet.classList.toggle('collapsed');
 };
 
+let startY = 0;
+sheetHandle.addEventListener('touchstart', (e) => {
+  startY = e.touches[0].clientY;
+}, { passive: true });
+
+sheetHandle.addEventListener('touchend', (e) => {
+  const endY = e.changedTouches[0].clientY;
+  if (startY - endY > 30) {
+    // Swipe up
+    bottomSheet.classList.remove('collapsed');
+  } else if (endY - startY > 30) {
+    // Swipe down
+    bottomSheet.classList.add('collapsed');
+  }
+}, { passive: true });
+
 const diagModal = document.getElementById('diag-modal');
 document.getElementById('btn-diag-toggle').onclick = () => {
   diagModal.classList.remove('hidden');
@@ -289,6 +305,18 @@ function onDeviceMotion(e) {
     diagAccel.textContent = `${accMag.toFixed(2)} m/s²`;
     diagGrav.textContent = `${Math.sqrt(latestGravityEst.x**2 + latestGravityEst.y**2 + latestGravityEst.z**2).toFixed(2)} m/s²`;
     diagGyro.textContent = `${latestGyro.yaw.toFixed(2)} rad/s`;
+  }
+  
+  // Approximate linear acceleration by subtracting gravity
+  const linX = a.x - latestGravityEst.x;
+  const linY = a.y - latestGravityEst.y;
+  const linZ = a.z - latestGravityEst.z;
+  
+  // Forward acceleration is typically mostly along the Y axis of the phone
+  const fwdAccel = linY;
+  const telFwdAccel = document.getElementById('tel-fwd-accel');
+  if (telFwdAccel) {
+    telFwdAccel.textContent = `${fwdAccel.toFixed(2)} m/s²`;
   }
 }
 
@@ -502,9 +530,13 @@ function showStartNavButton() {
 
 document.getElementById('btn-start-nav-floating').onclick = () => {
   document.getElementById('btn-start-nav-floating').style.display = 'none';
-  document.getElementById('speed-hud').classList.remove('hidden');
-  document.getElementById('bottom-sheet').classList.remove('hidden');
   document.getElementById('btn-start-live').click();
+  
+  // Add animation to the drawn route line
+  const routeEl = routeLine.getElement();
+  if (routeEl) {
+    routeEl.classList.add('animated-route');
+  }
 };
 
 map.on('click', async (e) => {

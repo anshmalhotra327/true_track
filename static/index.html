@@ -16,7 +16,6 @@
   <div class="top-nav-bar">
     <div class="brand">
       <span class="brand-title">S.A.F.A.R.</span>
-      <span class="brand-subtitle">TrueTrack</span>
     </div>
     
     <div class="nav-mode-badge gnss-active" id="nav-mode-badge">
@@ -41,10 +40,11 @@
       <input type="text" id="destination-search" placeholder="Search destination (address, landmark)..." autocomplete="off">
     </div>
     <div id="geocode-results" class="geocode-results hidden"></div>
-    <button id="btn-start-nav-floating" class="btn-accent hidden" style="width: 100%; margin-top: 10px; padding: 12px; font-size: 16px; display: none;">
-      <i class="fa-solid fa-location-arrow"></i> Start Navigation
-    </button>
   </div>
+
+  <button id="btn-start-nav-floating" class="btn-accent hidden" style="position: absolute; bottom: 220px; left: 50%; transform: translateX(-50%); padding: 16px 32px; font-size: 18px; border-radius: 30px; box-shadow: 0 10px 25px rgba(37,99,235,0.4); z-index: 1000; display: none;">
+    <i class="fa-solid fa-location-arrow"></i> Start Navigation
+  </button>
 
   <!-- Map Floating Controls -->
   <div class="map-controls">
@@ -54,7 +54,7 @@
   </div>
 
   <!-- Floating Speed HUD -->
-  <div class="speed-hud-card hidden" id="speed-hud">
+  <div class="speed-hud-card" id="speed-hud">
     <div class="speed-number" id="hud-speed">0</div>
     <div class="speed-unit">km/h</div>
     <div class="confidence-bar-container">
@@ -66,7 +66,7 @@
   </div>
 
   <!-- Expandable Bottom Sheet -->
-  <div class="bottom-sheet collapsed hidden" id="bottom-sheet">
+  <div class="bottom-sheet collapsed" id="bottom-sheet">
     <div class="sheet-handle-area" id="sheet-handle">
       <div class="sheet-handle-bar"></div>
     </div>
@@ -140,10 +140,10 @@
           </div>
         </div>
         <div class="telemetry-card">
-          <div class="telemetry-icon"><i class="fa-solid fa-location-crosshairs"></i></div>
+          <div class="telemetry-icon"><i class="fa-solid fa-rocket"></i></div>
           <div class="telemetry-info">
-            <span class="telemetry-label">Position Uncertainty</span>
-            <span class="telemetry-val" id="tel-uncertainty">± 0.5 m</span>
+            <span class="telemetry-label">Forward Accel</span>
+            <span class="telemetry-val" id="tel-fwd-accel">0.00 m/s²</span>
           </div>
         </div>
         <div class="telemetry-card">

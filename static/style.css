@@ -45,7 +45,7 @@ body, html {
 /* Top Nav Overlay Bar */
 .top-nav-bar {
   position: absolute;
-  top: 12px;
+  top: max(12px, env(safe-area-inset-top));
   left: 12px;
   right: 12px;
   z-index: 10;
@@ -142,10 +142,10 @@ body, html {
   background: rgba(255, 255, 255, 0.18);
 }
 
-/* Search Overlay - Increased top margin to 88px to eliminate overlap */
+/* Search Overlay - Increased top margin to eliminate overlap */
 .search-overlay {
   position: absolute;
-  top: 88px;
+  top: calc(max(12px, env(safe-area-inset-top)) + 76px);
   left: 12px;
   right: 12px;
   max-width: 520px;
@@ -694,4 +694,13 @@ input:checked + .slider:before {
 
 .d-lbl {
   color: var(--text-muted);
+}
+
+.animated-route {
+  stroke-dasharray: 15, 15;
+  animation: march 1s linear infinite;
+}
+
+@keyframes march {
+  to { stroke-dashoffset: -30; }
 }
