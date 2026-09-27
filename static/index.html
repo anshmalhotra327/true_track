@@ -39,9 +39,11 @@
     <div class="search-box">
       <i class="fa-solid fa-magnifying-glass search-icon"></i>
       <input type="text" id="destination-search" placeholder="Search destination (address, landmark)..." autocomplete="off">
-      <button id="btn-route" class="btn-accent">Route</button>
     </div>
     <div id="geocode-results" class="geocode-results hidden"></div>
+    <button id="btn-start-nav-floating" class="btn-accent hidden" style="width: 100%; margin-top: 10px; padding: 12px; font-size: 16px; display: none;">
+      <i class="fa-solid fa-location-arrow"></i> Start Navigation
+    </button>
   </div>
 
   <!-- Map Floating Controls -->
@@ -52,7 +54,7 @@
   </div>
 
   <!-- Floating Speed HUD -->
-  <div class="speed-hud-card">
+  <div class="speed-hud-card hidden" id="speed-hud">
     <div class="speed-number" id="hud-speed">0</div>
     <div class="speed-unit">km/h</div>
     <div class="confidence-bar-container">
@@ -64,7 +66,7 @@
   </div>
 
   <!-- Expandable Bottom Sheet -->
-  <div class="bottom-sheet collapsed" id="bottom-sheet">
+  <div class="bottom-sheet collapsed hidden" id="bottom-sheet">
     <div class="sheet-handle-area" id="sheet-handle">
       <div class="sheet-handle-bar"></div>
     </div>

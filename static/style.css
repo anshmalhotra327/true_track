@@ -30,6 +30,8 @@ body, html {
   color: var(--text-main);
 }
 
+.hidden { display: none !important; }
+
 /* Fullscreen Map */
 #map {
   width: 100vw;

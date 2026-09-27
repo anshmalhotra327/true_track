@@ -264,7 +264,7 @@ let latestGps = null;
 let lastFixTime = 0;
 let haveEverFixed = false;
 const MAX_ACCEPTABLE_ACCURACY_M = 60;
-const STALE_AFTER_MS = 4000;
+const STALE_AFTER_MS = 12000;
 
 function onDeviceMotion(e) {
   const a = e.accelerationIncludingGravity;
@@ -471,14 +471,44 @@ function renderGeocodeResults(results) {
       geocodeResultsBox.classList.add('hidden');
       searchInput.value = r.display_name;
       drawRoute();
+      showStartNavButton();
     };
   });
 }
 
-document.getElementById('btn-route').onclick = () => {
-  const q = searchInput.value.trim();
-  if (q) performSearch(q);
+function showStartNavButton() {
+  const btn = document.getElementById('btn-start-nav-floating');
+  if (btn) {
+    btn.classList.remove('hidden');
+    btn.style.display = 'block';
+  }
+}
+
+document.getElementById('btn-start-nav-floating').onclick = () => {
+  document.getElementById('btn-start-nav-floating').style.display = 'none';
+  document.getElementById('speed-hud').classList.remove('hidden');
+  document.getElementById('bottom-sheet').classList.remove('hidden');
+  document.getElementById('btn-start-live').click();
 };
+
+map.on('click', async (e) => {
+  if (tracking) return; // Don't allow changing dest if already tracking
+  const lat = e.latlng.lat;
+  const lon = e.latlng.lng;
+  const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`;
+  try {
+    const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+    const data = await res.json();
+    const name = data.display_name || `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+    selectedDestination = { lat, lon, label: name };
+    destMarker.setLatLng([lat, lon]).addTo(map);
+    searchInput.value = name;
+    drawRoute();
+    showStartNavButton();
+  } catch (err) {
+    console.warn("Reverse geocode failed", err);
+  }
+});
 
 async function drawRoute() {
   if (!selectedDestination) return;

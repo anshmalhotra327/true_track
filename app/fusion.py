@@ -396,7 +396,8 @@ class OnlineFusionSession:
         curr_speed_kmh = curr_speed_ms * 3.6
 
         # Anti-flicker logic: if we were mostly stationary, ignore random AI speed spikes from hand motion
-        if last_spd_kmh < 2.0 and curr_speed_kmh < 5.0 and v_ai_kmh < 25.0 and abs(a_forward) < 1.0:
+        # Make the condition much stricter to prevent 20-30kmph jumps
+        if last_spd_kmh < 3.0 and curr_speed_kmh < 10.0 and abs(a_forward) < 2.0:
             v_eff_ai = 0.0
             candidate_kmh = 0.0
         else:
