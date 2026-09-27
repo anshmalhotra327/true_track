@@ -381,7 +381,7 @@ class OnlineFusionSession:
 
         # Forward acceleration filtering
         a_forward = float(np.clip(ax_v, -3.0, 3.0))
-        if abs(a_forward) < 0.15:
+        if abs(a_forward) < 0.6:  # Increased threshold to ignore small hand movements
             a_forward = 0.0
 
         # Predict forward with EKF
@@ -392,19 +392,31 @@ class OnlineFusionSession:
         v_ai_kmh = max(0.0, raw_speed * self.speed_scale) if len(self.buf_lin_x) >= self.LONG_WINDOW else self.last_confirmed_speed_ms * 3.6
 
         last_spd_kmh = self.last_confirmed_speed_ms * 3.6
-        if v_ai_kmh < 5.0 and last_spd_kmh > 5.0 and a_forward >= -0.3:
-            v_eff_ai = last_spd_kmh
-        else:
-            v_eff_ai = v_ai_kmh
-
         curr_speed_ms = float(math.hypot(self.ekf.x[2, 0], self.ekf.x[3, 0]))
-        delta_v_phys_kmh = float(np.clip(a_forward, -2.0, 2.0)) * dt * 3.6
-        candidate_kmh = curr_speed_ms * 3.6 + delta_v_phys_kmh
-        
+        curr_speed_kmh = curr_speed_ms * 3.6
+
+        # Anti-flicker logic: if we were mostly stationary, ignore random AI speed spikes from hand motion
+        if last_spd_kmh < 2.0 and curr_speed_kmh < 5.0 and v_ai_kmh < 25.0 and abs(a_forward) < 1.0:
+            v_eff_ai = 0.0
+            candidate_kmh = 0.0
+        else:
+            if v_ai_kmh < 5.0 and last_spd_kmh > 5.0 and a_forward >= -0.3:
+                v_eff_ai = last_spd_kmh
+            else:
+                v_eff_ai = v_ai_kmh
+
+            delta_v_phys_kmh = float(np.clip(a_forward, -2.0, 2.0)) * dt * 3.6
+            candidate_kmh = curr_speed_kmh + delta_v_phys_kmh
+
         target_kmh = 0.85 * v_eff_ai + 0.15 * candidate_kmh
         target_kmh = float(np.clip(target_kmh, max(0.0, v_eff_ai - 15.0), v_eff_ai + 15.0))
+        
+        # Exponential smoothing to prevent rapid jumps
+        if not hasattr(self, 'smoothed_speed_kmh'):
+            self.smoothed_speed_kmh = target_kmh
+        self.smoothed_speed_kmh = 0.7 * self.smoothed_speed_kmh + 0.3 * target_kmh
 
-        fused_speed_ms = max(0.0, target_kmh / 3.6)
+        fused_speed_ms = max(0.0, self.smoothed_speed_kmh / 3.6)
         fused_speed_kmh = fused_speed_ms * 3.6
 
         # Update EKF with AI predicted speed & NHC constraint

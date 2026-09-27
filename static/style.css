@@ -1,17 +1,17 @@
 :root {
-  --bg-dark: #0b1329;
-  --panel-bg: rgba(15, 23, 42, 0.88);
-  --card-bg: rgba(30, 41, 59, 0.88);
+  --bg-dark: #f1f5f9;
+  --panel-bg: rgba(255, 255, 255, 0.90);
+  --card-bg: rgba(255, 255, 255, 0.95);
   --accent-blue: #2563eb;
   --accent-cyan: #0284c7;
   --accent-glow: #3b82f6;
   --accent-emerald: #10b981;
   --accent-amber: #f59e0b;
   --accent-rose: #f43f5e;
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
-  --border-glass: rgba(255, 255, 255, 0.12);
-  --shadow-main: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+  --text-main: #1e293b;
+  --text-muted: #64748b;
+  --border-glass: rgba(0, 0, 0, 0.08);
+  --shadow-main: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
 }
 
 * {

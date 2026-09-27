@@ -4,7 +4,7 @@
 
 // --- Map Initialization ---
 const map = L.map('map', {
-  zoomControl: false // custom floating controls
+  zoomControl: true // allow standard map zoom
 }).setView([20.5937, 78.9629], 5); // Default view until GPS fix
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
